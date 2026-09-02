@@ -1,0 +1,37 @@
+# Read data
+vitals <- read.csv("week1_vitals.csv")
+
+#Creat new variable and fill in with logic comparison
+vitals$bpcat <- NA
+vitals$bpcat[vitals$SBP < 120 & vitals$DBP < 80] <- "Normal"
+vitals$bpcat[vitals$SBP >= 120 & vitals$SBP < 130 & vitals$DBP < 80] <- "Elevated"
+vitals$bpcat[(vitals$SBP >= 130 & vitals$SBP < 140) | (vitals$DBP >= 80 & vitals$DBP < 90)] <- "Stage 1 Hypertension"
+vitals$bpcat[vitals$SBP >= 140 | vitals$DBP >= 90] <- "Stage 2 Hypertension"
+table(vitals$bpcat)
+
+# Look at the Mean and SD of Age by bpcat
+mean(vitals$AGE, na.rm=TRUE); sd(vitals$AGE, na.rm=TRUE)
+by(vitals$AGE, vitals$bpcat, function(x) c(mean=mean(x, na.rm=TRUE), sd=sd(x, na.rm=TRUE), nmiss=sum(is.na(x))))
+
+# Create new variable BMI. Calculate assuming weight in pounds and height in inches
+vitals$BMI <- NA
+vitals$BMI <- vitals$WEIGHT/(vitals$HEIGHT^2)*703
+# Look at the Mean and SD of BMI by bpcat
+mean(vitals$BMI, na.rm=TRUE); sd(vitals$BMI, na.rm=TRUE)
+by(vitals$BMI, vitals$bpcat, function(x) c(mean=mean(x, na.rm=TRUE), sd=sd(x, na.rm=TRUE), nmiss=sum(is.na(x))))
+
+# Look at frequency table of bpcat by Gender. Assuming Male=1 Female=2
+table(vitals$GENDER)
+prop.table(table(vitals$GENDER))*100
+
+table(vitals$GENDER, vitals$bpcat, useNA = "ifany")
+prop.table(table(vitals$GENDER, vitals$bpcat), 1)*100
+
+# Look at frequency table of bpcat by Race. Assuming White=1 Black=2 Hispanic=3 Asian=4
+table(vitals$RACE)
+prop.table(table(vitals$RACE))*100
+
+table(vitals$RACE, vitals$bpcat, useNA = "ifany")
+prop.table(table(vitals$RACE, vitals$bpcat), 1)*100
+
+
