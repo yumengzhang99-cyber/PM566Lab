@@ -101,4 +101,31 @@ Wind speed shows a rough daily cycle but is more unstable than temperature, with
 ## Step 8 Ask questions
 
 1.  What differences exist between the temperature or wind speed patterns at this highest elevation station and those at the lowest elevation station?
-2.  Temperature shows a moderate correlation with hour (r=0.44), but wind speed shows almost no correlation with hour (r = 0.088). Why doesn't wind speed follow a stable daily cycle the way temperature does at this highest elevation station? If the situation different in other stations or other months.
+2.  Temperature shows a moderate correlation with hour (r=0.44), but wind speed shows almost no correlation with hour (r = 0.088). Why doesn't wind speed follow a stable daily cycle the way temperature does at this highest elevation station? If the situation different in other stations.
+
+## More EDA
+
+```{r}
+# Look at temperature distribution by hours
+boxplot(temp ~ hour, data = elev, main = "Temp by Hour - Highest Elevation Station")
+
+# Look at wind speed distribution by hours
+boxplot(wind.sp ~ hour, data = elev, main = "Wind Speed by Hour - Highest Elevation Station")
+
+# Look at all correlation between temp, wind.sp, hour, day in one matrix
+library(corrplot)
+vars <- elev[, c("temp", "wind.sp", "hour", "day")]
+corr_matrix <- cor(vars, use = "complete.obs")
+corrplot(corr_matrix, method = "color", addCoef.col = "black")
+
+# Look at scatterplot relationships
+pairs(vars)
+```
+
+The boxplot of temperature by hour at the highest elevation station shows a clear, smooth cyclical pattern. Temperature is highest around hour 0 (median around 10°C) and lowest around hours 11-13 (median around 6°C), then rises steadily back toward hour 19–23. This consistent, single peak daily shape confirms the moderate correlation observed between temperature and hour(r=0.44).
+
+In contrast, the boxplot of wind speed by hour is much noisier and does not show the same clean cyclical shape. Medians fluctuate only mildly across most hours (around 6-8 m/s), with a modest increase visible around hours 10-14 and again around hours 19–20, but no smooth, single-peaked daily pattern comparable to temperature. This is consistent with the near-zero correlation between wind speed and hour (r=0.088).
+
+The correlation heatmap also shows the same relationships. Temperature correlates moderately with hour (0.44) but has essentially no relationship with day (-0.01). Wind speed, on the other hand, shows very weak correlation with hour (0.09) but a moderate positive correlation with day (0.36).
+
+Putting those evidences together, these plots suggest that while temperature at this station is governed by a stable cycle within day, wind speed fluctuates more, likely reflecting the influence of geographical structure rather than a consistent daily rhythm.
