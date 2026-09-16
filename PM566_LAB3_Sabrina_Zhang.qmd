@@ -1,0 +1,104 @@
+---
+title: "PM566LAB3Sabrina"
+format: html
+editor: visual
+embed-resources: true
+theme: darkly
+---
+
+## Step 1 Read in the data & Step 2 Check the dimensions, headers, footers
+
+```{r}
+met <- read.csv("D:/USC-MPH2025/PM566/PM566Lab/met_all.gz")
+
+dim(met)
+head(met)
+tail(met)
+```
+
+## Step 3 Take a look at the variables
+
+```{r}
+str(met)
+```
+
+## Step 4 Take a closer look at the key variables
+
+```{r}
+table(met$year)
+table(met$day)
+table(met$hour)
+summary(met$temp)
+summary(met$elev)
+summary(met$wind.sp)
+```
+
+```{r}
+met$elev[met$elev==9999.0] <- NA
+summary(met$elev)
+```
+
+```{r}
+met <- met[met$temp > -40, ]
+met2 <- met[order(met$temp), ]
+head(met2)
+```
+
+## Step 5 Check the data against an external data source.
+
+```{r}
+met <- met[met$temp > -15, ]
+met2 <- met[order(met$temp), ]
+head(met2)
+```
+
+## Step 6 Calculate summary statistics
+
+```{r}
+elev <- met[met$elev == max(met$elev, na.rm = TRUE),]
+summary(elev)
+```
+
+```{r}
+cor(elev$temp, elev$wind.sp, use="complete")
+cor(elev$temp, elev$hour, use="complete")
+cor(elev$wind.sp, elev$day, use="complete")
+cor(elev$wind.sp, elev$hour, use="complete")
+cor(elev$temp, elev$day, use="complete")
+```
+
+## Step 7 Exploratory graphs
+
+```{r}
+hist(met$elev, breaks=100)
+hist(met$temp)
+hist(met$wind.sp)
+```
+
+```{r}
+library(leaflet)
+leaflet(elev) %>%
+  addProviderTiles('OpenStreetMap') %>% 
+  addCircles(lat=~lat,lng=~lon, opacity=1, fillOpacity=1, radius=100)
+```
+
+```{r}
+library(lubridate)
+elev$date <- with(elev, ymd_h(paste(year, month, day, hour, sep= ' ')))
+summary(elev$date)
+elev <- elev[order(elev$date), ]
+head(elev)
+```
+
+```{r}
+plot(elev$date, elev$temp, type='l')
+plot(elev$date, elev$wind.sp, type='l')
+```
+
+Temperature at the station with maximum elevation shows a clear daily cycle, where repeated rises during daytime and falls at night, and stayed relatively stable conditions across the month of August, with no strong overall trendings.\
+Wind speed shows a rough daily cycle but is more unstable than temperature, with visible short-term fluctuations rather than a smooth pattern, such as notably sharp plunges around August 19 and August 26, and a gradual increase in wind speed between August 12 and August 18. No consistent trend is apparent over the full month beyond these localized swings.
+
+## Step 8 Ask questions
+
+1.  What differences exist between the temperature or wind speed patterns at this highest elevation station and those at the lowest elevation station?
+2.  Temperature shows a moderate correlation with hour (r=0.44), but wind speed shows almost no correlation with hour (r = 0.088). Why doesn't wind speed follow a stable daily cycle the way temperature does at this highest elevation station? If the situation different in other stations or other months.

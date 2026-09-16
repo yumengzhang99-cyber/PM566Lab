@@ -1,0 +1,54 @@
+### test for a single proportion
+prop.test(x = 570, n = 1097, p = 0.5, alternative = "greater", correct = FALSE)
+sqrt(1.6855)
+
+### test-based score 95% CI interval (or other alpha level), also known as 
+#   Wilson score interval.
+# pi.had: #successes / #trials
+# n: #trials
+# alpha: significance level, for 95% interval, alpha = 0.05
+ci.score.test.based <- function(pi.hat, n, alpha=0.05){
+  za <- qnorm(alpha/2, lower.tail=FALSE)
+  p1 <- 1 / (1 + za^2 / n)
+  p22 <- za^2 / (2*n)
+  p231 <- za / (2*n)
+  p232 <- sqrt(4*n*pi.hat*(1 - pi.hat) + za^2)
+  ul <- p1 * (pi.hat + p22 + p231*p232)
+  ll <- p1 * (pi.hat + p22 - p231*p232)
+  ci <- c(ll, ul)
+  return(ci)
+}
+ci.score.test.based(pi.hat=0.52, n=1097, alpha=0.05)
+# 0.4904175 0.5494429
+
+ci.score.test.based(pi.hat=7/20, n=20, alpha=0.05)
+# 0.1811918 0.5671457
+
+### Wald test for a single proportion
+test.one.prop <- function(x, n, p0, alternative, test.type){
+  #x is the total number of successes
+  #n is the total sample size
+  #p0= proportion under the null hypothesis
+  #alternative: "two.sided", "greater than", "less than"
+  #test.type: "Wald" or "Score"
+  p.hat <- x/n
+  if(test.type == "Wald"){
+    est.var <- (p.hat*(1-p.hat))/n
+  }else if(test.type == "Score"){
+    est.var <- (p0*(1 - p0))/n
+  }
+  z.test.stat <- (p.hat - p0)/sqrt(est.var)
+  
+  if(alternative == "two.sided"){
+    p.val = 2*pnorm(abs(z.test.stat), lower.tail = FALSE)
+  }else if(alternative == "greater than"){
+    p.val = pnorm(z.test.stat, lower.tail = FALSE)
+  }else if(alternative == "less than"){
+    p.val = pnorm(z.test.stat, lower.tail = TRUE)
+  }
+  
+  return(paste("test statistic (Z):", round(z.test.stat, 4), ", p-val: ", round(p.val, 4)))
+}
+
+test.one.prop(x = 570, n = 1097, p0 = 0.5, alternative = "greater than", test.type = "Wald")
+test.one.prop(x = 570, n = 1097, p0 = 0.5, alternative = "greater than", test.type = "Score")
