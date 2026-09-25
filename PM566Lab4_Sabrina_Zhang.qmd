@@ -1,0 +1,194 @@
+---
+title: "PM566Lab4_Sabrina_Zhang"
+author: "Sabrina Zhang"
+format: html
+editor: visual
+embed-resources: true
+theme: darkly
+---
+
+## Step 1 read file
+
+```{r}
+if (!file.exists("met_all.gz"))
+  download.file(
+    url = "https://raw.githubusercontent.com/USCbiostats/data-science-data/master/02_met/met_all.gz",
+    destfile = "met_all.gz",
+    method   = "libcurl",
+    timeout  = 60
+    )
+met <- read.csv("met_all.gz")
+
+
+```
+
+## step2
+
+```{r}
+library(dplyr)
+#elev=9999 as NA
+met$elev[met$elev==9999.0] <- NA
+#ignore obs temperature<17
+met <- met[met$temp > -17, ]
+#create date variable
+met$date<- as.Date(paste(met$year, met$month, met$day, sep = "-"))
+#ignore day>7
+met <- met[met$day <= 7,]
+#calculate mean for variables by station
+met_avg <- summarize(met,temp =     mean(temp, na.rm = TRUE),
+                     rh =       mean(rh, na.rm = TRUE),
+                     wind.sp =  mean(wind.sp, na.rm = TRUE),
+                     vis.dist = mean(vis.dist, na.rm = TRUE),
+                     dew.point = mean(dew.point, na.rm = TRUE),
+                     lat =      mean(lat, na.rm = TRUE),
+                     lon =      mean(lon, na.rm = TRUE),
+                     elev =     mean(elev, na.rm = TRUE),
+                     .by = c(USAFID))
+#create region variable using longitude and latitude
+met_avg$region <- ifelse(met_avg$lon > -98, 
+                         ifelse(met_avg$lat > 39, "NE", "SE"),
+                         ifelse(met_avg$lat > 39, "NW", "SW"))
+#create elev categorical variable
+met_avg$elev_cat <- ifelse(met_avg$elev > 252, "high", "low")
+```
+
+## step 3 Examine the relative humidity and dew point by region
+
+```{r}
+library(ggplot2)
+met_avg[!is.na(met_avg$region), ] %>%
+  ggplot() + 
+  geom_violin(mapping = aes(x = 1, y = rh, fill = region)) +
+  facet_wrap(~ region, nrow = 1) +
+  labs(title = "Relative Humidity by Region",
+       y = "Relative Humidity")
+met_avg[!is.na(met_avg$region), ] %>%
+  ggplot() + 
+  geom_violin(mapping = aes(x = 1, y = dew.point, fill = region)) +
+  facet_wrap(~ region, nrow = 1) +
+  labs(title = "Dew Point by Region",
+       y = "Dew Point (°C)")
+```
+
+The Eastern regions (NE, SE) are consistently more humid with higher dew points compared to the Western regions (NW, SW), indicating greater atmospheric moisture in the East.
+
+## Step 4 Examine the association between dew point and relative humidity by region
+
+```{r}
+met_avg[!is.na(met_avg$region), ] %>%
+  ggplot(mapping = aes(x = rh, y = dew.point, color = region, linetype = region)) +
+  geom_point() + 
+  geom_smooth(method = lm, se = FALSE, col = "black") +
+  labs(title = "Dew Point vs Relative Humidity by Region",
+       x = "Relative Humidity (%)",
+       y = "Dew Point (°C)")
+
+
+```
+
+The plot shows a strong positive association between dew point and relative humidity across all regions, with notable regional variations. The Southeast and Northeast show a notably higher dew point at any given relative humidity level compared to the West. This indicates that Eastern regions have warmer, more moisture. All regions show similar regression line slopes, indicating the positive linear relationships between relative humidity and dew point are similar.
+
+## Step 5 Barplots of the weather stations by elevation category colored by region
+
+```{r}
+met_avg[!is.na(met_avg$elev_cat) & !is.na(met_avg$region), ] %>%
+  ggplot() + 
+  geom_bar(mapping = aes(x = elev_cat, fill = region), position = "dodge") +
+  scale_fill_brewer(palette = "Set1") +
+  labs(title = "Number of Stations by Elevation Category",
+       x = "Elevation Category",
+       y = "Count",
+       fill = "Region")
+```
+
+The bar chart reveals striking differences in how weather stations are distributed across elevation categories and geographic regions. The Southeast has substantially more low-elevation weather stations, reflecting the flat coastal plains and lowlands of that region, while the Southwest and Northwest are dominated by high-elevation stations in their mountainous areas.
+
+## Step 6 Examine mean dew point and wind speed by region with standard deviation error bars
+
+```{r}
+met_avg[!is.na(met_avg$region), ] %>%
+  ggplot() + 
+  stat_summary(mapping = aes(x = region, y = dew.point),
+               fun.data = "mean_sdl",
+               geom = "point") +
+  stat_summary(mapping = aes(x = region, y = dew.point),
+               fun.data = "mean_sdl",
+               geom = "errorbar", width = 0.2) +
+  labs(title = "Mean Dew Point by Region with SD",
+       x = "Region",
+       y = "Dew Point (°C)")
+
+met_avg[!is.na(met_avg$region), ] %>%
+  ggplot() + 
+  stat_summary(mapping = aes(x = region, y = wind.sp),
+               fun.data = "mean_sdl",
+               geom = "point") +
+  stat_summary(mapping = aes(x = region, y = wind.sp),
+               fun.data = "mean_sdl",
+               geom = "errorbar", width = 0.2) +
+  labs(title = "Mean Wind Speed by Region with SD",
+       x = "Region",
+       y = "Wind Speed (m/s)")
+```
+
+The Southeast exhibits the highest mean dew point with relatively tight uncertainty, while the Northwest and Southwest show substantially greater variability in dew point, indicating more unstable atmospheric moisture. Wind speed is consistently lowest in the Eastern regions and elevated in the Southwest and Northwest, the variability is similar for all regions.
+
+## Step 7 Make a map showing the spatial trend in relative humidity in the US
+
+```{r}
+library(leaflet)
+met_avg2 <- met_avg %>%
+  filter(!is.na(rh)) %>%
+  mutate(rank_rh = rank(-rh))
+
+top_rh <- met_avg2[met_avg2$rank_rh <= 10, ]
+
+rh.pal <- colorNumeric(c('darkgreen','goldenrod','brown'), domain = met_avg2$rh)
+
+rhmap <- leaflet(met_avg2[!is.na(met_avg2$rh), ]) %>% 
+  addProviderTiles('CartoDB.Positron') %>% 
+  addCircles(
+    lat = ~lat, lng = ~lon,
+    label = ~paste0(round(rh, 2), '%'), 
+    color = ~ rh.pal(rh),
+    opacity = 1, 
+    fillOpacity = 1, 
+    radius = 500
+  ) %>%
+  addMarkers(
+    data = top_rh,
+    lat = ~lat, lng = ~lon,
+    popup = ~paste0("RH: ", round(rh, 2), "%")
+  ) %>%
+  addLegend('bottomleft', pal = rh.pal, values = ~rh,
+            title = 'Relative Humidity (%)', opacity = 1)
+
+rhmap
+```
+
+Relative humidity exhibits a clear geographic pattern, with the Northwest and Southeast coast regions showing the highest moisture levels, while the interior Southwest and Mountain West display substantially lower humidity.
+
+## Step 8 Use a ggplot extension
+
+```{r}
+
+library(ggridges)
+
+met_avg %>% 
+  filter(!is.na(region), !is.na(temp)) %>%
+  ggplot(aes(x = temp, y = region, fill = region)) +
+  geom_density_ridges(alpha = 0.7) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    x = "Temperature (°C)",
+    y = "Region",
+    title = "Temperature Distribution by Region - Density Ridges",
+    fill = "Region"
+  ) +
+  theme_ridges() +
+  theme(legend.position = "bottom")
+```
+
+I selected the ggridges, which creates density ridge plots that stack distributions vertically by region. This reveals both the central tendency and the full shape of each region's temperature distribution in a single plot, thus it could visuallize regional differences immediately apparent without overlapping.
+
+The density ridge plot reveals pronounced regional temperature gradients, with the Northeast and Northwest showing cooler, tightly concentrated distributions, while the Southeast and Southwest display notably warmer temperatures with broader more variable.
