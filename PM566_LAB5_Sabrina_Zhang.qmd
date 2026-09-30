@@ -1,0 +1,228 @@
+---
+title: "LAB5_Sabrina_Zhang"
+author: "Sabrina_Zhang"
+format: html
+editor: visual
+embed-resources: true
+theme: darkly
+---
+
+
+```{r}
+library(dplyr)
+library(dtplyr)
+
+# Import met
+met <- read.csv("D:/USC-MPH2025/PM566/PM566Lab/met_all.gz")
+# Download the data
+stations <- read.csv("https://noaa-isd-pds.s3.amazonaws.com/isd-history.csv")
+stations$USAF <- as.integer(stations$USAF)
+
+# Dealing with blanks and 999999
+stations$USAF[stations$USAF == 999999] <- NA
+stations$CTRY[stations$CTRY == ""] <- NA
+stations$STATE[stations$STATE == ""] <- NA
+
+# Selecting the three relevant columns, and keeping unique records
+stations <- unique(stations[, c('USAF', 'CTRY', 'STATE')])
+
+# Dropping NAs
+stations <- stations[!is.na(stations$USAF), ]
+
+# Removing duplicates
+stations <- stations[!duplicated(stations$USAF), ]
+
+# Merge two datasets
+met<- merge(met, stations, 
+             by.x = "USAFID", by.y = "USAF", 
+             all.x = TRUE, all.y = FALSE)
+```
+## Q1
+
+```{r}
+# Filter only 48 states in contiguous US 
+met <- met |>
+  filter(
+    CTRY == "US",
+    !is.na(STATE),
+    !(STATE %in% c("AK", "HI"))
+  )
+# Compute the average variables for each station in August 2019
+station_avg <- met |>
+  summarise(
+    temp_avg = mean(temp, na.rm = TRUE),
+    wind_avg = mean(wind.sp, na.rm = TRUE),
+    atmpress_avg = mean(atm.press, na.rm = TRUE),
+    .by = c(USAFID, STATE)
+  )
+# Compute the medians for all stations in US
+med_temp <- quantile(station_avg$temp_avg, probs = 0.5, na.rm = TRUE)
+med_windsp <- quantile(station_avg$wind_avg, probs = 0.5, na.rm = TRUE)
+med_atmpress <- quantile(station_avg$atmpress_avg, probs = 0.5, na.rm = TRUE)
+
+# Create new variable which compute the different from medians
+met <- met |>
+  mutate(
+    temp_diff = abs(temp - med_temp),
+    windsp_diff = abs(wind.sp - med_windsp),
+    atmpress_diff = abs(atm.press - med_atmpress)
+  )
+
+# Find the stations closest to medians
+temp_rep <- which.min(abs(station_avg$temp_avg - med_temp))
+wind_rep <- which.min(abs(station_avg$wind_avg - med_windsp))
+pressure_rep <- which.min(abs(station_avg$atmpress_avg - med_atmpress))
+
+# Output in data frame
+indices <- c(temp_rep, wind_rep, pressure_rep)
+
+rep_stations <- data.frame(
+  variable = c("Temperature", "Wind speed", "Atmospheric pressure"),
+  USAFID = station_avg$USAFID[indices],
+  STATE = station_avg$STATE[indices],
+  median_value = c(med_temp, med_windsp, med_atmpress),
+  station_value = c(
+    station_avg$temp_avg[temp_rep],
+    station_avg$wind_avg[wind_rep],
+    station_avg$atmpress_avg[pressure_rep]
+  )
+)
+
+rep_stations
+```
+The median station for temperature is USAFID 720458 in KY with mean temperature 23.68 Celsius degree. For wind speed, the median station is USAFID 720929 in WI with mean wind speed 2.46 m/s. For atmospheric pressure, the median station is USAFID 722238 in AL with mean atmospheric pressure 1014.69 hPa. These three stations do not coincide, as they have different USAFIDs.
+
+
+##Q2
+```{r}
+# List all the unique stations
+station_coordinates <- met |>
+  summarise(
+    lat = mean(lat, na.rm = TRUE),
+    lon = mean(lon, na.rm = TRUE),
+    .by = c(STATE, USAFID)
+  ) |>
+  filter(!is.na(lat), !is.na(lon))
+# Compute the median coordinates for each states
+state_median_coordinates <- station_coordinates |>
+  summarise(
+    med_lat = quantile(lat, probs = 0.5, na.rm = TRUE),
+    med_lon = quantile(lon, probs = 0.5, na.rm = TRUE),
+    .by = STATE
+  ) |>
+  arrange(STATE)
+
+state_median_coordinates
+
+```
+## Q3
+
+```{r}
+# Compute mean coordinates for each states
+mean_coords <- station_coordinates |>
+  group_by(STATE) |>
+  summarise(
+    mean_lat = mean(lat, na.rm = TRUE),
+    mean_lon = mean(lon, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Merge the coordinates back to met
+met_with_mean <- merge(
+  met,
+  mean_coords,
+  by = "STATE",
+  all.x = TRUE
+)
+
+# Creare new variable that compute the distance from mean coordinates
+met_with_mean <- met_with_mean |>
+  mutate(
+    distance = sqrt((lat - mean_lat)^2 + (lon - mean_lon)^2)
+  )
+
+# Find the lowest distance stations
+closest_stations <- met_with_mean |>
+  group_by(STATE) |>
+  slice(which.min(distance)) |>
+  ungroup()
+
+print(closest_stations[, c('USAFID', 'STATE', 'lat', 'lon', 'distance')], n = Inf)
+# Leaflet map
+library(leaflet)
+
+leaflet() |>
+  addTiles() |>
+  # Median coordinate - Blue
+  addCircleMarkers(
+    data = state_median_coordinates,
+    lng = ~med_lon, 
+    lat = ~med_lat,
+    radius = 5,
+    color = 'blue',
+    label = ~paste(STATE, "- Median"),
+    popup = ~paste(STATE, "Median:", round(med_lat, 2), round(med_lon, 2))
+  ) |>
+  # Closest to mean - Red
+  addCircleMarkers(
+    data = closest_stations,
+    lng = ~lon, 
+    lat = ~lat,
+    radius = 5,
+    color = 'red',
+    label = ~paste(STATE, "- Closest to mean"),
+    popup = ~paste(STATE, "Closest:", round(lat, 2), round(lon, 2))
+  ) |>  
+addLegend(
+    position = "bottomright",
+    colors = c("blue", "red"),
+    labels = c("Median Coordinates", "Closest to Mean"),
+    title = "MedianCoordinates & Closest to Mean",
+    opacity = 1
+  )
+```
+## Q4
+```{r}
+#Compute the mean temperature for each states
+state_temp_avg <- met |>
+  group_by(STATE) |>
+  summarise(
+    state_mean_temp = mean(temp, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# merge back
+met_classified <- merge(
+  met,
+  state_temp_avg,
+  by = "STATE",
+  all.x = TRUE
+)
+
+# Create new variable temperature categories
+met_classified <- met_classified |>
+  mutate(
+    temp_category = ifelse(
+      state_mean_temp < 20, "low",
+      ifelse(state_mean_temp < 25, "Mid", "High")
+    )
+  )
+
+summary_table <- met_classified |>
+  group_by(temp_category) |>
+  summarise(
+    N_states = n_distinct(STATE),
+    N_entries = n(),
+    N_NA = sum(is.na(temp)),
+    N_stations = n_distinct(USAFID),
+    Mean_temp = mean(temp, na.rm = TRUE),
+    Mean_windsp = mean(wind.sp, na.rm = TRUE),
+    Mean_atmpress = mean(atm.press, na.rm = TRUE),
+    .groups = 'drop'
+  ) |>
+  arrange(temp_category)
+
+print(summary_table, width = Inf)
+```
+
+
