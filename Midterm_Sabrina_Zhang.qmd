@@ -1,0 +1,809 @@
+---
+title: "Midterm_Sabrina_Zhang"
+author: "Sabrina_Zhang"
+format: html
+editor: visual
+embed-resources: true
+theme: darkly
+---
+
+## Introduction
+
+### Research question
+
+**How do health behaviors and access to care differ across U.S. counties with different levels of diagnosed diabetes, and where do higher diabetes prevalence and gaps in insurance coverage overlap?**
+
+Diabetes creates continuing needs for diagnosis, treatment, and follow-up. A county with a high diabetes estimate and many uninsured adults may face a different combination of needs from a county with a similarly high diabetes estimate and broader insurance coverage. Comparing several indicators can describe these differences more meaningfully than studying obesity alone.
+
+This project uses [CDC PLACES County Data, 2024 release](https://data.cdc.gov/d/fu4u-a9bh). The selected estimates all refer to 2022. Each observation in the analysis is a county or county equivalent. The estimates are modeled percentages, rather than individual medical records or observed counts of patients. CDC estimates these county percentages by combining survey responses with population information in a statistical model. [CDC: Methodology](https://www.cdc.gov/places/methodology/index.html) The objective is to describe community profiles and identify combinations that deserve further local investigation.
+
+The analysis proceeds from data quality and variable distributions to comparisons across diabetes groups, comparisons within obesity groups, and an illustration of overlapping diabetes and insurance needs, including their geographic distribution. A supplementary analysis examines food insecurity where it is reported.
+
+## Data preparation
+
+### Data acquisition
+
+The data are downloaded directly from the public CDC API for the PLACES County Data, 2024 release. The query selects 2022, eight indicators, and age-adjusted estimates only. It requests up to 50,000 records to avoid the API's default row limit. The resulting download contains 24,433 records and 10 fields. Indicator coverage is checked during preparation.
+
+```{r}
+suppressWarnings(suppressPackageStartupMessages({
+  library(httr)
+  library(stringr)
+  library(dplyr)
+  library(ggplot2)
+  library(knitr)
+}))
+api_url <- "https://data.cdc.gov/resource/fu4u-a9bh.json"
+measure_ids <- c("DIABETES","OBESITY","LPA","CSMOKING","SLEEP",
+                 "ACCESS2","CHECKUP","FOODINSECU")
+where <- paste("year = '2022' AND datavaluetypeid = 'AgeAdjPrv' AND measureid in (",
+               paste0("'",measure_ids,"'",collapse=","),")")
+query_text <- paste(
+  "SELECT year,stateabbr,locationname,locationid,measure,measureid,",
+  "datavaluetypeid,data_value,low_confidence_limit,high_confidence_limit",
+  "WHERE",where,"ORDER BY locationid,measureid LIMIT 50000")
+response <- GET(api_url,query=list("$query"=query_text))
+stop_for_status(response)
+records <- content(response,as="parsed",type="application/json")
+raw <- lapply(records,function(x) {
+  data.frame(
+    year=x$year,state=x$stateabbr,
+    county=if(is.null(x$locationname)) NA_character_ else x$locationname,
+    fips=x$locationid,measure=x$measure,id=x$measureid,
+    estimate=x$datavaluetypeid,
+    value=if(is.null(x$data_value)) NA_real_ else as.numeric(x$data_value),
+    lower=if(is.null(x$low_confidence_limit)) NA_real_ else as.numeric(x$low_confidence_limit),
+    upper=if(is.null(x$high_confidence_limit)) NA_real_ else as.numeric(x$high_confidence_limit))
+})
+raw <- do.call(rbind,raw)
+```
+
+### Variables and cleaning decisions
+
+Diagnosed diabetes is the outcome. The six main comparison variables are obesity, leisure-time inactivity, current smoking, short sleep, lack of insurance, and routine checkups. Food insecurity is a supplementary social-needs indicator. All percentages in this report are age-adjusted. Most indicators concern adults aged 18 years or older, whereas uninsured prevalence concerns adults aged 18-64; the age populations are not identical.
+
+The variables retain CDC's PLACES definitions. Obesity means BMI at least 30 kg/m², calculated from self-reported height and weight. Diagnosed diabetes means respondents report being told by a doctor or another health professional that they have diabetes, excluding diabetes occurring only during pregnancy. These are self-reported survey-based inputs to modeled county estimates, not diagnoses confirmed from medical records. [CDC: Health Outcomes](https://www.cdc.gov/places/measure-definitions/health-outcomes.html)
+
+Leisure-time inactivity means no physical activity or exercise outside the regular job during the preceding month. Current smoking requires at least 100 cigarettes over the lifetime and smoking every day or some days now. Short sleep means usually averaging fewer than seven hours of sleep per 24-hour period. The activity indicator therefore does not measure occupational activity, and short sleep is not a count of occasional short nights. [CDC: Health Risk Behaviors](https://www.cdc.gov/places/measure-definitions/health-risk-behaviors.html)
+
+The uninsured indicator means no current health insurance among adults aged 18-64. Routine checkups mean a routine doctor visit within the previous year, such as a general physical examination, rather than an examination for a particular illness or injury. This percentage tells us how many adults report a routine checkup. It does not tell us whether problems were detected or treated, or whether patients received the follow-up they needed. These are limits on our interpretation, not additional parts of CDC's indicator definition. [CDC: Prevention](https://www.cdc.gov/places/measure-definitions/prevention.html)
+
+Food insecurity identifies adults reporting that, during the past 12 months, purchased food always, usually, or sometimes did not last and there was no money to obtain more. The underlying food question appears in the 2022 survey's optional Social Determinants and Health Equity module. [CDC: Health-Related Social Needs](https://www.cdc.gov/places/measure-definitions/health-related-social-needs.html); [2022 BRFSS questionnaire, Module 16, question MSDHE.06](https://www.cdc.gov/brfss/questionnaires/pdf-ques/2022-BRFSS-Questionnaire-508.pdf#page=100)
+
+The preparation checks identifier format, duplicate keys, missing indicator values, percentage ranges, missing confidence limits, and the order of point estimates and their confidence limits. A county FIPS is kept as text so its leading zero is not lost. The regular expression checks for five digits, but does not by itself prove that an identifier is a real county.
+
+```{r}
+# Check identifiers without converting their leading zeros to numbers.
+raw <- raw |> mutate(
+  valid_fips=str_detect(fips,"^[0-9]{5}$"))
+national <- raw |> filter(state=="US")
+county_long <- raw |> filter(state!="US",valid_fips)
+# Check duplication and implausibles
+duplicate_keys <- sum(duplicated(county_long[,c("fips","id","estimate")]))
+invalid_values <- sum(county_long$value<0 | county_long$value>100,na.rm=TRUE)
+missing_intervals <- sum(is.na(county_long$lower) | is.na(county_long$upper))
+invalid_intervals <- sum(county_long$lower>county_long$value |
+                          county_long$value>county_long$upper,na.rm=TRUE)
+
+# Turning long table to wide table each row as a county
+wide <- county_long |> filter(id=="DIABETES") |>
+  select(fips,state,county,DIABETES=value)
+for(v in measure_ids[-1]) {
+  piece <- county_long |> filter(id==v) |> select(fips,value)
+  names(piece)[2] <- v
+  wide <- merge(x=wide,y=piece,by="fips",all.x=TRUE)
+}
+core_ids <- measure_ids[1:7]
+dat <- wide[complete.cases(wide[,core_ids]), ]
+food <- dat |> filter(!is.na(FOODINSECU))
+
+dictionary <- data.frame(
+  id=measure_ids,
+  Label=c("Diagnosed diabetes","Obesity","No leisure-time activity",
+          "Current smoking","Short sleep (<7 hours)","Uninsured (18-64)",
+          "Routine checkup","Food insecurity"),
+  Population=c(rep("Adults 18+",5),"Adults 18-64","Adults 18+","Adults 18+"))
+# Check data coverage for all variables
+coverage <- do.call(rbind,lapply(measure_ids,function(v) {
+  x <- county_long |> filter(id==v)
+  data.frame(id=v,Counties_reported=nrow(x),States_DC=length(unique(x$state)),
+             Missing_reported_values=sum(is.na(x$value)),
+             Counties_without_record=nrow(wide)-nrow(x))
+}))
+coverage <- merge(x=dictionary,y=coverage,by="id",all.x=TRUE)
+coverage <- coverage[match(measure_ids,coverage$id), ]
+# Result of checks as a table
+audit <- data.frame(
+  Check=c("API age-adjusted records","National reference rows separated",
+          "County/indicator records","Duplicate county-indicator-type keys",
+          "Out-of-range percentages","Missing confidence intervals",
+          "Invalid confidence intervals","Counties before core-value restriction",
+          "Counties removed for missing core values","Counties retained",
+          "Food-subset counties"),
+  Count=c(nrow(raw),nrow(national),nrow(county_long),duplicate_keys,
+          invalid_values,missing_intervals,invalid_intervals,nrow(wide),
+          nrow(wide)-nrow(dat),nrow(dat),nrow(food)))
+```
+
+```{r}
+knitr::kable(audit,caption="Table 1. Data integrity and analysis denominators.",
+  digits=0,
+  col.names=c("Check", "Count"),
+  format="html", row.names=FALSE, format.args=list(big.mark=","))
+knitr::kable(coverage |> select(Indicator=Label,Population,Counties=Counties_reported,
+                         States_DC,Missing_values=Missing_reported_values,
+                         No_county_record=Counties_without_record),
+      caption="Table 2. Age-adjusted indicator coverage. Missing records differ from missing reported values.",
+  digits=0,
+  col.names=c("Indicator", "Population", "Counties", "States / DC", "Missing values", "No record"),
+  format="html", row.names=FALSE, format.args=list(big.mark=","))
+```
+
+**Why the row count changes.** In the API download, one row represents one geography and one indicator, with the estimate type fixed to age-adjusted. It is not one row per county. The 24,433 records contain eight national reference rows, one for each indicator. Those reference rows are stored separately because a national estimate is not an additional county. This leaves 24,425 county-indicator records. Seven core indicators each have 3,144 county records, and food insecurity has 2,417: 7 × 3,144 + 2,417 = 24,425.
+
+The county records are then combined horizontally by FIPS, starting with the diabetes records. One row in the resulting wide table represents one county, and the indicators occupy separate columns. The change from 24,425 records to 3,144 county rows is a change of data structure, not the deletion of 21,281 counties.
+
+**How to read Table 1.** Duplicate keys count repeated county-indicator-estimate combinations; different indicators for the same county are expected and are not duplicates. Out-of-range percentages count reported values below 0 or above 100. Missing confidence intervals count records without a lower or upper limit; invalid intervals count a lower limit above the point estimate or an upper limit below it. All four problem counts are zero. Range and interval checks alone do not establish that indicator values are complete, so missing indicator coverage is reported separately in Table 2.
+
+The last rows of Table 1 distinguish the county sample before and after restricting to complete values for all seven core indicators. Both counts are 3,144; zero counties are removed for missing core values. The food-subset row identifies the 2,417 counties with a food estimate and does not imply that all other counties were removed from the main analysis.
+
+**Which variables are missing?** Table 2 shows that diabetes, obesity, inactivity, smoking, short sleep, uninsured prevalence, and checkups each have 3,144 reported values, no absent county records, and no missing values within reported records. Food insecurity has 2,417 reported values and 727 absent county records, with no missing values within its reported records. After the horizontal merge, those absent food records appear as NA in the food column. No zero values are substituted, and no imputation is performed.
+
+### Which states and counties have food estimates?
+
+Food estimates cover 40 state/DC jurisdictions. Records are absent for Arkansas, Colorado, Hawaii, Illinois, Louisiana, North Dakota, New York, Oregon, Pennsylvania, South Dakota, and Virginia. This is geographic noncoverage of an optional survey module, not evidence that residents in those states have no food insecurity. The covered and uncovered counties are compared later, and food analyses are explicitly restricted to covered counties.
+
+```{r}
+# Reference geography: counties retained in this report's main analysis.
+# This is not an independently verified census of administrative counties.
+state_names <- data.frame(state=c(state.abb,"DC"),
+  State=c(state.name,"District of Columbia"),
+  region=tolower(c(state.name,"District of Columbia")))
+expected_counties <- unique(dat[,c("state","county","fips")])
+food_county_keys <- county_long |> filter(id=="FOODINSECU",!is.na(value)) |>
+  select(state,fips) |> unique()
+food_state_coverage <- do.call(rbind,lapply(sort(unique(expected_counties$state)),function(s) {
+  expected_ids <- expected_counties$fips[expected_counties$state==s]
+  observed_ids <- food_county_keys$fips[food_county_keys$state==s]
+  missing_ids <- setdiff(expected_ids,observed_ids)
+  extra_ids <- setdiff(observed_ids,expected_ids)
+  data.frame(state=s,Expected=length(expected_ids),With_food=length(observed_ids),
+    Missing=length(missing_ids),Unexpected=length(extra_ids),
+    Status=ifelse(setequal(expected_ids,observed_ids),"Complete",
+      ifelse(length(extra_ids)>0,"FIPS mismatch",
+        ifelse(length(observed_ids)==0,"No coverage","Partial coverage"))))
+}))
+food_state_coverage <- merge(x=food_state_coverage,y=state_names[,c("state","State")],
+                             by="state",all.x=TRUE)
+food_state_coverage <- food_state_coverage |> arrange(State)
+knitr::kable(food_state_coverage |>
+  filter(Missing>0 | Unexpected>0) |>
+  select(State,Expected,With_food,Missing,Unexpected,Status),
+  digits=0,row.names=FALSE,format="html",format.args=list(big.mark=","),
+  col.names=c("State / DC","Expected counties (main sample)","Counties with food estimate",
+              "Missing counties","Unexpected counties","FIPS coverage result"),
+  caption="Table 3. States with missing or unexpected county FIPS codes for food insecurity, compared with the main analysis sample. Exact matches are omitted.")
+
+missing_food_counties <- expected_counties[
+  !expected_counties$fips %in% food_county_keys$fips, ]
+missing_food_counties <- merge(x=missing_food_counties,y=state_names[,c("state","State")],
+                               by="state",all.x=TRUE)
+missing_food_counties <- missing_food_counties |> arrange(State,county)
+```
+
+The data show complete coverage of the main-sample counties in 39 states and DC, and no coverage in the other 11 states. No state is partially covered, and no unexpected county FIPS is found. The covered states contain 2,417 counties in total; the uncovered states contain the remaining 727. This conclusion comes from checking all states in the downloaded records; the table displays only the 11 states with discrepancies.
+
+### Comparison rules
+
+Only age-adjusted estimates are used to make comparisons less affected by differences in county age composition. Every county receives equal weight, so the means and medians describe counties rather than the national population. The age-adjusted diabetes percentage is used to compare counties, so it is not multiplied by population to calculate the number of people with diabetes.
+
+Diabetes and obesity quartiles create four groups ordered from lowest to highest. Equal values are kept together, so the groups can have different sizes. Comparisons within obesity quartiles ask whether inactivity and insurance patterns remain visible among counties with broadly similar obesity estimates. The six comparison indicators are also correlated with each other to examine whether they describe overlapping county characteristics. These comparisons are descriptive and do not estimate independent effects.
+
+For the overlap illustration, higher diabetes and higher uninsured prevalence mean estimates at or above their respective national county 75th percentiles. These are relative sample thresholds rather than clinical cutoffs or validated criteria for allocating resources. Correlations summarize observed patterns without significance tests or causal interpretation.
+
+## Exploratory data analysis
+
+### Coverage, distributions, and unusual values
+
+```{r}
+# Summarize the distribution of each indicator before displaying the table.
+descriptive <- do.call(rbind,lapply(measure_ids,function(v) {
+  x <- dat[,v]
+  data.frame(id=v,N=sum(!is.na(x)),Mean=mean(x,na.rm=TRUE),SD=sd(x,na.rm=TRUE),
+    Median=median(x,na.rm=TRUE),Q1=unname(quantile(x,.25,na.rm=TRUE)),
+    Q3=unname(quantile(x,.75,na.rm=TRUE)),Min=min(x,na.rm=TRUE),Max=max(x,na.rm=TRUE))
+}))
+descriptive <- merge(x=dictionary[,c("id","Label")],y=descriptive,by="id",all.x=TRUE)
+descriptive <- descriptive[match(measure_ids,descriptive$id), ]
+
+display_summary <- descriptive |> mutate(
+  `Mean (SD)`=paste0(sprintf("%.1f",Mean)," (",sprintf("%.1f",SD),")"),
+  `Median [Q1, Q3]`=paste0(sprintf("%.1f",Median)," [",sprintf("%.1f",Q1),", ",sprintf("%.1f",Q3),"]"),
+  Range=paste0(sprintf("%.1f",Min)," to ",sprintf("%.1f",Max))) |>
+  select(Indicator=Label, Counties=N, `Mean (SD)`, `Median [Q1, Q3]`, Range)
+knitr::kable(display_summary,caption="Table 4. County distributions; all indicator values are percentages.",
+  digits=0,
+  col.names=c("Indicator", "Counties", "Mean (SD)", "Median [Q1, Q3]", "Range"),
+  format="html", row.names=FALSE, format.args=list(big.mark=","))
+```
+
+```{r}
+distribution_data <- county_long |>
+  filter(fips %in% dat$fips) |>
+  merge(y=dictionary[,c("id","Label")],by="id",all.x=TRUE)
+ggplot(distribution_data,aes(value)) +
+  geom_histogram(bins=30,fill="#7ABBDB",color="white") +
+  facet_wrap(~Label,scales="free_x",ncol=3) +
+  labs(x="Age-adjusted estimated prevalence (%)",y="Counties") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),
+        panel.grid=element_blank(),panel.border=element_rect(color="black",fill=NA),
+        strip.background=element_rect(fill="white",color="black"),
+        strip.text=element_text(color="black"))
+```
+
+*Figure 1. Indicator distributions. Each panel has its own horizontal scale; food insecurity has fewer counties.*
+
+The median county diabetes estimate is 10.8%, with an interquartile range of approximately 9.4%–12.5% and a range of 6.0%–21.5%. Median obesity is 38.4%, while median inactivity is 26.0%. These indicators have different distributions and ranges, which is why each histogram uses its own horizontal scale. The food histogram describes only the counties where that indicator is available.
+
+We checked for duplicate records, percentages outside 0-100%, and confidence limits inconsistent with their point estimates. None of these problems was found, so we did not exclude counties because their estimates were unusually high or low.
+
+### Relationships with the outcome
+
+Figure 2 deliberately includes only the six comparison indicators available for all 3,144 counties, so every panel uses the same county sample. Food insecurity is not included in these six panels because it is available for only 2,417 counties; the other 727 counties have no record for that indicator. Its relationship with diabetes is plotted separately in the food-insecurity section. This separation makes the coverage difference visible and avoids presenting the food subset as a complete national sample.
+
+```{r}
+# Pair each of the six comparison indicators with diabetes.
+predictors <- core_ids[-1]
+long <- do.call(rbind,lapply(predictors,function(v) {
+  data.frame(diabetes=dat$DIABETES,id=v,X=dat[,v])
+}))
+long <- merge(x=long,y=dictionary[,c("id","Label")],by="id",all.x=TRUE)
+
+# Compute the correlation between diabetes and 6 variables
+correlations <- long |> group_by(id,Label) |>
+  summarise(Counties=n(),Pearson_r=cor(X,diabetes),.groups="drop")
+
+ggplot(long,aes(X,diabetes)) + geom_point(alpha=.2,size=.7,color="#4485C7") +
+  facet_wrap(~Label,scales="free_x",ncol=2) +
+  labs(x="Indicator: age-adjusted estimated prevalence (%)",
+       y="Diabetes: age-adjusted estimated prevalence (%)") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),
+        panel.grid=element_blank(),panel.border=element_rect(color="black",fill=NA),
+        strip.background=element_rect(fill="white",color="black"),
+        strip.text=element_text(color="black"))
+```
+
+*Figure 2. Six county characteristics versus diabetes; n=3,144 in every panel. Diabetes axes are shared; horizontal scales differ. Food insecurity is analyzed separately among 2,417 covered counties.*
+
+```{r}
+knitr::kable(correlations |> select(Indicator=Label,Counties,Pearson_r),
+  digits=2,row.names=FALSE,format="html",format.args=list(big.mark=","),
+  col.names=c("Comparison indicator","Counties","Correlation with diabetes"),
+  caption="Table 5. Pearson correlations for the six scatterplot panels; each pair uses the same 3,144 counties.")
+```
+
+The six scatterplots examine every nationally available comparison indicator against diabetes. Inactivity has the strongest of these linear associations, with a correlation of 0.88; the corresponding obesity correlation is 0.70. Smoking, short sleep, and lack of insurance also show positive patterns. Considerable variation remains, so none of these variables uniquely determines a county's diabetes estimate.
+
+Routine checkups require a different interpretation. Their correlation with diabetes is positive, at 0.34. Reverse causation cannot be ruled out: counties with more diagnosed disease may have more reason for routine visits. Conversely, more frequent checkups may also detect previously undiagnosed diabetes, so the recorded county prevalence appears higher. These data cannot distinguish those explanations, and the pattern does not establish that checkups increase diabetes. The association therefore does not show that checkups are a risk factor.
+
+## Preliminary results
+
+### 1. Compare complete health profiles across diabetes groups
+
+```{r}
+# Create four county diabetes quartile groups for the profile comparison.
+dat <- dat |> mutate(
+  diabetes_group=cut(DIABETES,quantile(DIABETES,c(0,.25,.5,.75,1)),include.lowest=TRUE,
+                     labels=c("Q1","Q2","Q3","Q4")))
+
+profiles <- do.call(rbind,lapply(core_ids,function(v) {
+  data.frame(diabetes_group=dat$diabetes_group,value=dat[,v]) |>
+    group_by(diabetes_group) |>
+    summarise(Mean=mean(value),.groups="drop") |> mutate(id=v)
+}))
+
+profile_table <- data.frame(Indicator=dictionary$Label[1:7])
+for (q in levels(dat$diabetes_group)) {
+  piece <- profiles |> filter(diabetes_group==q)
+  profile_table[[q]] <- piece$Mean[match(core_ids,piece$id)]
+}
+group_sizes <- dat |> group_by(diabetes_group) |> summarise(Counties=n(),.groups="drop")
+names(profile_table)[-1] <- paste0(group_sizes$diabetes_group," (n=",group_sizes$Counties,")")
+knitr::kable(profile_table,digits=1,caption="Table 6. Mean county indicator percentages across increasing diabetes quartiles.",
+  col.names=names(profile_table),
+  format="html", row.names=FALSE, format.args=list(big.mark=","))
+```
+
+The profile table compares all seven core indicators using the same diabetes groups and county denominators. Higher-diabetes counties generally have higher behavioral-risk and uninsured estimates. The checkup pattern again shows why healthcare utilization cannot be interpreted as a simple inverse measure of disease burden. These are comparisons of county averages, not evidence that the same individuals have every characteristic.
+
+### 2. Compare diabetes distributions within obesity groups
+
+These comparisons ask: **among counties with broadly similar obesity estimates, how does diabetes differ between counties with lower and higher values of each other indicator?** We examine all five nationally covered X indicators other than obesity: inactivity, smoking, short sleep, uninsured prevalence, and checkups. Obesity is already the grouping variable. Food insecurity is analyzed separately because its geographic coverage is different.
+
+The same rule is used throughout. Counties are first divided into four obesity groups, from lowest to highest. For each comparison indicator, lower means below its national county median and higher means at or above that median; the median is not recalculated within each obesity group. Blue represents the lower group and burgundy the higher group.
+
+The vertical axis shows county diabetes estimates, not county counts. The line inside each box is the median, the box spans the 25th to 75th percentiles, and whiskers extend to observed values within 1.5 interquartile ranges. Points beyond the whiskers remain in the data.
+
+The code calculates each group’s median to verify the text. All group medians are listed in the Appendix .
+
+#### 2.1. Leisure-time inactivity
+
+The national county median is 26.0%. The higher group includes counties equal to this cutoff.
+
+```{r}
+# Create four county obesity quartile groups for the five comparisons below.
+dat <- dat |> mutate(
+  obesity_group=cut(OBESITY,quantile(OBESITY,c(0,.25,.5,.75,1)),include.lowest=TRUE,
+                    labels=c("Q1","Q2","Q3","Q4")))
+
+activity_cut <- median(dat$LPA)
+dat <- dat |> mutate(activity_group=factor(
+  ifelse(LPA>=activity_cut,"Higher","Lower"),levels=c("Lower","Higher")))
+activity_summary <- dat |> group_by(obesity_group,activity_group) |>
+  summarise(Median_diabetes=median(DIABETES),.groups="drop")
+
+ggplot(dat,aes(obesity_group,DIABETES,fill=activity_group)) +
+  geom_boxplot(width=.65,outlier.size=.6) +
+  scale_fill_manual(values=c("Lower"="#4485C7","Higher"="#A51C36")) +
+  scale_x_discrete(labels=c("Q1"="Lowest obesity","Q2"="Lower obesity",
+                            "Q3"="Higher obesity","Q4"="Highest obesity")) +
+  labs(title="Diabetes by leisure-time inactivity",
+       x="County obesity group (from lowest to highest)",
+       y="Age-adjusted diabetes estimate (%)",fill="Leisure-time inactivity") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),panel.grid=element_blank(),
+        panel.border=element_rect(color="black",fill=NA),
+        legend.position="bottom",legend.text=element_text(color="black"))
+```
+
+*Figure 3. Diabetes distributions by leisure-time inactivity within four county obesity groups. Blue is below the national median; burgundy is at or above it.*
+
+In the lowest-obesity group, median diabetes is 11.5% in higher-inactivity counties and approximately 9.1% in lower-inactivity counties. In the highest-obesity group, the medians are 13.6% and 9.8%. Higher-inactivity counties have a higher median in each of the four obesity groups.
+
+#### 2.2. Current smoking
+
+The national county median is 17.7%. The higher group includes counties equal to this cutoff.
+
+```{r}
+smoking_cut <- median(dat$CSMOKING)
+dat <- dat |> mutate(smoking_group=factor(
+  ifelse(CSMOKING>=smoking_cut,"Higher","Lower"),levels=c("Lower","Higher")))
+smoking_summary <- dat |> group_by(obesity_group,smoking_group) |>
+  summarise(Median_diabetes=median(DIABETES),.groups="drop")
+
+ggplot(dat,aes(obesity_group,DIABETES,fill=smoking_group)) +
+  geom_boxplot(width=.65,outlier.size=.6) +
+  scale_fill_manual(values=c("Lower"="#4485C7","Higher"="#A51C36")) +
+  scale_x_discrete(labels=c("Q1"="Lowest obesity","Q2"="Lower obesity",
+                            "Q3"="Higher obesity","Q4"="Highest obesity")) +
+  labs(title="Diabetes by current smoking",
+       x="County obesity group (from lowest to highest)",
+       y="Age-adjusted diabetes estimate (%)",fill="Current smoking") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),panel.grid=element_blank(),
+        panel.border=element_rect(color="black",fill=NA),
+        legend.position="bottom",legend.text=element_text(color="black"))
+```
+
+*Figure 4. Diabetes distributions by current smoking within four county obesity groups. Blue is below the national median; burgundy is at or above it.*
+
+In the lowest-obesity group, diabetes medians are 9.8% and 9.1% for higher- and lower-smoking counties. In the highest-obesity group, they are 13.5% and 12.0%. The higher-smoking group has a higher median in all four obesity groups, although the differences are not identical across groups.
+
+#### 2.3. Short sleep
+
+The national county median is 37.6%. The higher group includes counties equal to this cutoff.
+
+```{r}
+sleep_cut <- median(dat$SLEEP)
+dat <- dat |> mutate(sleep_group=factor(
+  ifelse(SLEEP>=sleep_cut,"Higher","Lower"),levels=c("Lower","Higher")))
+sleep_summary <- dat |> group_by(obesity_group,sleep_group) |>
+  summarise(Median_diabetes=median(DIABETES),.groups="drop")
+
+ggplot(dat,aes(obesity_group,DIABETES,fill=sleep_group)) +
+  geom_boxplot(width=.65,outlier.size=.6) +
+  scale_fill_manual(values=c("Lower"="#4485C7","Higher"="#A51C36")) +
+  scale_x_discrete(labels=c("Q1"="Lowest obesity","Q2"="Lower obesity",
+                            "Q3"="Higher obesity","Q4"="Highest obesity")) +
+  labs(title="Diabetes by short sleep",
+       x="County obesity group (from lowest to highest)",
+       y="Age-adjusted diabetes estimate (%)",fill="Short sleep") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),panel.grid=element_blank(),
+        panel.border=element_rect(color="black",fill=NA),
+        legend.position="bottom",legend.text=element_text(color="black"))
+```
+
+*Figure 5. Diabetes distributions by short sleep within four county obesity groups. Blue is below the national median; burgundy is at or above it.*
+
+In the lowest-obesity group, diabetes medians are 10.1% and 9.0% for higher- and lower-short-sleep counties. In the highest-obesity group, they are 13.8% and 10.6%. The positive pattern remains visible within the broad obesity groups, with overlap and variation among counties.
+
+#### 2.4. Uninsured prevalence
+
+The national county median is 10.5%. The higher group includes counties equal to this cutoff.
+
+```{r}
+insurance_cut <- median(dat$ACCESS2)
+dat <- dat |> mutate(insurance_group=factor(
+  ifelse(ACCESS2>=insurance_cut,"Higher","Lower"),levels=c("Lower","Higher")))
+insurance_summary <- dat |> group_by(obesity_group,insurance_group) |>
+  summarise(Median_diabetes=median(DIABETES),.groups="drop")
+
+ggplot(dat,aes(obesity_group,DIABETES,fill=insurance_group)) +
+  geom_boxplot(width=.65,outlier.size=.6) +
+  scale_fill_manual(values=c("Lower"="#4485C7","Higher"="#A51C36")) +
+  scale_x_discrete(labels=c("Q1"="Lowest obesity","Q2"="Lower obesity",
+                            "Q3"="Higher obesity","Q4"="Highest obesity")) +
+  labs(title="Diabetes by uninsured prevalence",
+       x="County obesity group (from lowest to highest)",
+       y="Age-adjusted diabetes estimate (%)",fill="Uninsured prevalence") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),panel.grid=element_blank(),
+        panel.border=element_rect(color="black",fill=NA),
+        legend.position="bottom",legend.text=element_text(color="black"))
+```
+
+*Figure 6. Diabetes distributions by uninsured prevalence within four county obesity groups. Blue is below the national median; burgundy is at or above it.*
+
+In the lowest-obesity group, diabetes medians are 10.0% and 8.8% for higher- and lower-uninsured counties. In the highest-obesity group, they are 14.0% and 11.8%. Insurance therefore adds information about the county profile beyond the broad obesity grouping. The comparison does not identify which individuals have both diabetes and no insurance.
+
+#### 2.5. Routine checkups
+
+The national county median is 74.4%. The higher group includes counties equal to this cutoff.
+
+```{r}
+checkup_cut <- median(dat$CHECKUP)
+dat <- dat |> mutate(checkup_group=factor(
+  ifelse(CHECKUP>=checkup_cut,"Higher","Lower"),levels=c("Lower","Higher")))
+checkup_summary <- dat |> group_by(obesity_group,checkup_group) |>
+  summarise(Median_diabetes=median(DIABETES),.groups="drop")
+
+ggplot(dat,aes(obesity_group,DIABETES,fill=checkup_group)) +
+  geom_boxplot(width=.65,outlier.size=.6) +
+  scale_fill_manual(values=c("Lower"="#4485C7","Higher"="#A51C36")) +
+  scale_x_discrete(labels=c("Q1"="Lowest obesity","Q2"="Lower obesity",
+                            "Q3"="Higher obesity","Q4"="Highest obesity")) +
+  labs(title="Diabetes by routine checkups",
+       x="County obesity group (from lowest to highest)",
+       y="Age-adjusted diabetes estimate (%)",fill="Routine checkups") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),panel.grid=element_blank(),
+        panel.border=element_rect(color="black",fill=NA),
+        legend.position="bottom",legend.text=element_text(color="black"))
+```
+
+*Figure 7. Diabetes distributions by routine checkups within four county obesity groups. Blue is below the national median; burgundy is at or above it.*
+
+Higher-checkup counties also have higher diabetes medians in each obesity group. In the lowest-obesity group, the medians are 9.3% and 9.1% for higher- and lower-checkup counties; in the highest group, they are 13.5% and 12.6%. This is not evidence that checkups cause diabetes. Counties with greater health needs or more diagnosis opportunities may show both higher estimates, but these data cannot identify the explanation.
+
+These boxplots describe within-group distributions, not independent effects: obesity still varies inside each group, other county characteristics are uncontrolled, and the observations are modeled county estimates rather than individual records. No significance tests are performed.
+
+### 3. Examine correlations among the comparison indicators
+
+The scatterplots compare each X with diabetes. This heatmap instead compares X with X: obesity, inactivity, smoking, short sleep, uninsured prevalence, and checkups. Diabetes is not included. Every pair uses the same 3,144 counties. Food insecurity is kept separate because only 2,417 counties have that estimate.
+
+```{r}
+x_labels <- c("Obesity","Leisure-time\ninactivity","Current\nsmoking",
+              "Short\nsleep","Uninsured\n(18-64)","Routine\ncheckups")
+x_cor <- cor(dat[,predictors])
+heat_data <- expand.grid(Row=seq_along(x_labels),Column=seq_along(x_labels))
+heat_data$r <- as.vector(x_cor)
+heat_data$Row <- factor(heat_data$Row,levels=rev(seq_along(x_labels)),labels=rev(x_labels))
+heat_data$Column <- factor(heat_data$Column,levels=seq_along(x_labels),labels=x_labels)
+ggplot(heat_data,aes(Column,Row,fill=r)) +
+  geom_tile(color="white") +
+  geom_text(data=heat_data |> filter(abs(r)<=.6),aes(label=sprintf("%.2f",r)),
+            color="black",size=3.2) +
+  geom_text(data=heat_data |> filter(abs(r)>.6),aes(label=sprintf("%.2f",r)),
+            color="white",size=3.2) +
+  scale_fill_gradient2(low="#4485C7",mid="white",high="#A51C36",midpoint=0,
+                       limits=c(-1,1),breaks=c(-1,-.5,0,.5,1)) +
+  coord_fixed() +
+  labs(title="Correlations among the six comparison indicators",x=NULL,y=NULL,fill="Pearson r") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black",size=8),
+        axis.ticks=element_blank(),panel.grid=element_blank(),
+        panel.border=element_blank(),legend.position="bottom")
+```
+
+*Figure 8. Pearson correlations among six comparison indicators, using 3,144 counties for every cell. Blue represents negative correlation, white zero, and burgundy positive correlation. The common color scale runs from -1 to 1; numbers give each correlation to two decimals.*
+
+To read the heatmap, choose an indicator on the left and another along the bottom; the intersecting cell gives their correlation. Positive values mean higher estimates tend to occur in the same counties, while negative values indicate opposite directions. Values near zero indicate a weaker linear pattern. The diagonal is 1 because each variable is correlated with itself; the remaining pairs are repeated by symmetry.
+
+Inactivity is positively correlated with smoking (r=0.79), obesity (r=0.76), and short sleep (r=0.73). These measures describe overlapping county characteristics rather than separate, independent explanations of diabetes. Uninsured prevalence is less closely related to obesity (r=0.32) and has a small negative correlation with checkups (r=-0.15). The heatmap therefore helps distinguish similar behavioral profiles from the insurance and service-use dimensions, without estimating causal effects.
+
+### 4. Identify overlapping diabetes and insurance needs
+
+The upper-quartile thresholds are 12.5% for diabetes and 14.0% for uninsured adults.Both rules include values equal to the cutoff. County-level overlap does not imply that the same adults have diabetes and lack insurance.
+
+```{r}
+# Define high diabetes and high uninsured threshold, and find overlapping counties
+d_cut <- unname(quantile(dat$DIABETES,.75))
+u_cut <- unname(quantile(dat$ACCESS2,.75))
+dat <- dat |> mutate(
+  high_diabetes=DIABETES>=d_cut,high_uninsured=ACCESS2>=u_cut,
+  priority=high_diabetes & high_uninsured,
+  burden_access=factor(ifelse(high_diabetes,
+    ifelse(high_uninsured,"Higher diabetes / Higher uninsured","Higher diabetes / Lower uninsured"),
+    ifelse(high_uninsured,"Lower diabetes / Higher uninsured","Lower diabetes / Lower uninsured"))))
+# Medians for overlapping counties
+priority_profile <- dat |> group_by(burden_access) |>
+  summarise(Counties=n(),Diabetes=median(DIABETES),Uninsured=median(ACCESS2),
+            Obesity=median(OBESITY),Inactivity=median(LPA),.groups="drop")
+
+ggplot(dat,aes(ACCESS2,DIABETES,color=priority)) +
+  geom_point(alpha=.4,size=1) +
+  geom_vline(xintercept=u_cut,linetype="dashed") +
+  geom_hline(yintercept=d_cut,linetype="dashed") +
+  scale_color_manual(values=c("FALSE"="#7ABBDB","TRUE"="#D4562E"),
+                     labels=c("Other counties","Higher on both")) +
+  labs(x="Uninsured adults 18-64: age-adjusted estimate (%)",
+       y="Diabetes: age-adjusted estimate (%)",color=NULL) +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),
+        panel.grid=element_blank(),panel.border=element_rect(color="black",fill=NA),
+        strip.background=element_rect(fill="white",color="black"),
+        strip.text=element_text(color="black"))
+knitr::kable(priority_profile |> select(burden_access,Counties,Diabetes,Uninsured,Obesity,Inactivity),digits=1,
+      caption="Table 7. County profiles across the four burden/coverage combinations; indicator columns are medians (%).",
+  col.names=c("County group", "Counties", "Diabetes (%)", "Uninsured (%)", "Obesity (%)", "Inactivity (%)"),
+  format="html", row.names=FALSE, format.args=list(big.mark=","))
+
+
+```
+
+*Figure 9. County diabetes and uninsured estimates. Dashed lines mark upper-quartile cutoffs. Red-orange points meet both relative thresholds.*
+
+There are 443 counties meeting both thresholds, or 14.1% (443/3144) of all counties. Another 343 counties have higher diabetes but fall below the uninsured threshold, demonstrating that a similar diabetes burden can accompany a different insurance context. The overlap group has median diabetes of 14.0%, uninsured prevalence of 18.5%, and inactivity of 32.7%.
+
+If the two indicators were independent across counties, about 25% of counties would exceed the national upper-quartile threshold for diabetes, and 25% would exceed the threshold for uninsured adults. Under independence, the expected number of counties meeting both thresholds would be approximately 3,144 × 0.25 × 0.25 ≈ 197. The observed count of 443 is about 2.25 times this benchmark, which indicates that the overlap is more common than independence would predict. This comparison is a reference point rather than a significance test.
+
+### 5. Geographic patterns of diabetes and overlapping insurance gaps
+
+The maps summarize the county observations within each state. The first map shows the median age-adjusted diabetes estimate across counties. The second shows the percentage of a state's counties meeting both the national diabetes and uninsured thresholds. The legends use explicit display bands; those bands do not change which counties meet the original national thresholds. White fill in the overlap map represents a true zero, and all mapped regions have matched data. These maps answer different questions and use separate legends. Neither describes the percentage of all residents in a state with diabetes, nor the percentage of residents who are both diabetic and uninsured.
+
+State summaries are joined to the boundary data by state name. The join is checked for unmatched regions, and the original polygon point order is restored before drawing the outlines. Multiple polygon pieces are retained, including islands. No county observations are removed from the main analysis to construct the maps.
+
+```{r}
+state_health <- dat |> group_by(state) |>
+  summarise(Counties=n(), Median_diabetes=median(DIABETES),
+            Overlap=sum(priority), Percent=100*mean(priority),.groups="drop")
+
+
+stopifnot(!anyDuplicated(state_names$state))
+state_health <- merge(x=state_health,y=state_names,by="state",all.x=TRUE)
+stopifnot(nrow(state_health)==51, !anyNA(state_health$region),
+          sum(state_health$Counties)==3144, sum(state_health$Overlap)==443)
+
+us_map <- map_data("state")
+us_map$point_order <- seq_len(nrow(us_map))
+map_health <- merge(x=us_map,y=state_health,by="region",all.x=TRUE,sort=FALSE)
+map_health <- map_health |> arrange(point_order)
+stopifnot(nrow(map_health)==nrow(us_map),
+          !anyNA(map_health$Median_diabetes), !anyNA(map_health$Percent),
+          length(unique(map_health$region))==49,
+          setequal(setdiff(state_health$region,us_map$region),c("alaska","hawaii")))
+
+map_health <- map_health |> mutate(
+  diabetes_band=cut(Median_diabetes,breaks=c(0,9,11,13,100),right=FALSE,
+    labels=c("Below 9%","9 to <11%","11 to <13%","13% or higher")),
+  overlap_band=ifelse(Percent==0,"0%",
+    as.character(cut(Percent,breaks=c(0,15,30,45,100),right=TRUE,
+      labels=c(">0 to 15%",">15 to 30%",">30 to 45%",">45%")))),
+  overlap_band=factor(overlap_band,
+    levels=c("0%",">0 to 15%",">15 to 30%",">30 to 45%",">45%")))
+stopifnot(!anyNA(map_health$diabetes_band),!anyNA(map_health$overlap_band))
+
+map_style <- theme_void(base_size=10) +
+  theme(plot.background=element_rect(fill="white",color=NA),
+        plot.title=element_text(face="bold",size=14,color="black"),
+        plot.subtitle=element_text(size=10,color="black",margin=margin(b=12)),
+        plot.caption=element_text(size=8,color="black",hjust=0),
+        legend.position="bottom", legend.title=element_text(size=9),
+        legend.text=element_text(size=9),
+        plot.margin=margin(15,15,12,15))
+
+ggplot(map_health,aes(x=long,y=lat,group=group,fill=diabetes_band)) +
+  geom_polygon(color="black",linewidth=.15) +
+  coord_quickmap() +
+  scale_fill_manual(values=c("Below 9%"="#7ABBDB","9 to <11%"="#4485C7",
+                             "11 to <13%"="#682487","13% or higher"="#A51C36"),
+                    drop=FALSE,na.value="black") +
+  labs(title="Where is county diabetes burden higher?",
+       subtitle="Median age-adjusted diabetes estimate across counties, 2022",
+       fill="County median (%)",
+       caption="Contiguous states and DC. Counties receive equal weight; this is not state population prevalence.") +
+  map_style
+```
+
+*Figure 10. State medians of county diabetes estimates. The map summarizes counties rather than individual residents.*
+
+```{r}
+ggplot(map_health,aes(x=long,y=lat,group=group,fill=overlap_band)) +
+  geom_polygon(color="black",linewidth=.15) +
+  coord_quickmap() +
+  scale_fill_manual(values=c("0%"="white",">0 to 15%"="#7ABBDB",
+                             ">15 to 30%"="#84BA42",">30 to 45%"="#DBB428",">45%"="#A51C36"),
+                    drop=FALSE,na.value="black") +
+  labs(title="Where do diabetes and insurance gaps overlap?",
+       subtitle="Counties meeting BOTH national upper-quartile thresholds, 2022",
+       fill="Counties within each state (%)",
+       caption="White fill means zero overlap; black fill would indicate missing data.
+Contiguous states and DC; Alaska and Hawaii are reported below.") +
+  map_style
+```
+
+*Figure 11. Within-state percentage of counties meeting both thresholds. The denominator is the number of counties in each state.*
+
+```{r}
+small_geographies <- state_health |> filter(state %in% c("AK","HI","DC")) |>
+  select(State,Counties,Median_diabetes,Overlap,Percent)
+knitr::kable(small_geographies,digits=1,
+  caption="Table 8. Alaska and Hawaii are outside the map extent; DC is too small to see clearly. Indicator and overlap percentages have different denominators.",
+  col.names=c("State", "Counties", "Median diabetes (%)", "Overlap counties", "Within-state (%)"),
+  format="html", row.names=FALSE, format.args=list(big.mark=","))
+
+```
+
+The maps show why high diabetes burden alone is not a complete description of access-related need. Mississippi has a county diabetes median of 14.3%, and 52.4% of its counties meet both thresholds. The overlap is also prominent in Texas and Georgia, where 56.7% and 52.2% of counties meet both criteria. In contrast, West Virginia has a county diabetes median of 13.0%, but none of its counties meets both thresholds. A zero here means no county satisfies this particular pair of rules; it does not mean there is no diabetes, no uninsured population, or no unmet healthcare need.
+
+The second map uses percentages instead of overlap counts so that states with many counties do not automatically appear more prominent. The supplementary table reports county counts for Alaska, Hawaii, and DC. Alaska has three overlap counties out of 30, or 10.0%; Hawaii and DC have none under these rules. Their results remain part of the national totals even though Alaska and Hawaii are outside the boundary map and DC is difficult to see at this scale.
+
+### 6. Extend the profile to food insecurity where available
+
+```{r}
+# Refresh the food subset so it includes the diabetes groups created above.
+food <- dat |> filter(!is.na(FOODINSECU))
+food_comparison <- dat |> mutate(Food_record=ifelse(is.na(FOODINSECU),"Unavailable","Available")) |>
+  group_by(Food_record) |> summarise(Counties=n(),States_DC=length(unique(state)),
+    Diabetes=median(DIABETES),Obesity=median(OBESITY),Uninsured=median(ACCESS2),.groups="drop")
+food_groups <- food |> group_by(diabetes_group) |>
+  summarise(Counties=n(),Food_mean=mean(FOODINSECU),Food_median=median(FOODINSECU),.groups="drop")
+
+knitr::kable(food_comparison,digits=1,
+      caption="Table 9. County coverage comparison; indicator values are medians (%).",
+  col.names=c("Food record", "Counties", "States / DC", "Diabetes (%)", "Obesity (%)", "Uninsured (%)"),
+  format="html", row.names=FALSE, format.args=list(big.mark=","))
+knitr::kable(food_groups,digits=1,
+      caption="Table 10. Food-insecurity estimates within the original national diabetes groups, restricted to covered counties.",
+  col.names=c("Diabetes quartile", "Counties", "Mean food insecurity (%)", "Median food insecurity (%)"),
+  format="html", row.names=FALSE, format.args=list(big.mark=","))
+```
+
+```{r}
+ggplot(food,aes(FOODINSECU,DIABETES)) +
+  geom_point(alpha=.25,size=1,color="#682487") +
+  labs(x="Food insecurity: age-adjusted estimate (%)",
+       y="Diabetes: age-adjusted estimate (%)") +
+  theme_bw() +
+  theme(text=element_text(color="black"),axis.text=element_text(color="black"),
+        axis.ticks=element_line(color="black"),
+        panel.grid=element_blank(),panel.border=element_rect(color="black",fill=NA),
+        strip.background=element_rect(fill="white",color="black"),
+        strip.text=element_text(color="black"))
+```
+
+*Figure 12. Food insecurity and diabetes among covered counties only. This figure does not represent missing states.*
+
+Among covered counties, mean food insecurity rises across the national diabetes quartiles: 10.7%, 13.3%, 16.7%, and 23.9%. This is consistent with material hardship accompanying higher diagnosed disease at the county level, and extends the analysis beyond behaviors alone.
+
+The coverage comparison limits that interpretation. Covered counties have median diabetes of 11.0%, compared with 10.1% in counties without food records; their median uninsured estimates are 11.2% and 9.0%. The available subset therefore differs from the excluded counties. The food findings apply to covered counties, and cannot be generalized as a complete national analysis.
+
+For completeness, the next table compares food insecurity with the six other X indicators using the same 2,417 covered counties for every pair. It is kept separate from the national X correlation matrix because its geographic sample is different. It describes co-occurrence within the available subset and does not fill in the uncovered states.
+
+```{r}
+food_x_cor <- do.call(rbind,lapply(predictors,function(v) {
+  data.frame(Indicator=dictionary$Label[match(v,dictionary$id)],
+             Counties=nrow(food),Pearson_r=cor(food[,v],food$FOODINSECU))
+}))
+knitr::kable(food_x_cor,digits=2,row.names=FALSE,format="html",
+  col.names=c("Comparison indicator","Counties","Correlation with food insecurity"),
+  caption="Table 11. Food insecurity versus the six other comparison indicators, restricted to 2,417 covered counties.",
+  format.args=list(big.mark=","))
+```
+
+## Conclusion and limitations
+
+Across 3,144 U.S. counties, higher diagnosed diabetes estimates were associated with higher inactivity, obesity, smoking, short sleep, and uninsured prevalence. Differences remained visible within broad obesity groups, although these comparisons do not establish independent effects. A total of 443 counties (14.1%) met both upper-quartile diabetes and uninsured thresholds, with geographic differences in the overlap. Food insecurity showed a similar positive pattern among the 2,417 counties with available estimates.
+
+These cross-sectional, modeled county estimates cannot establish causation or individual-level relationships. Counties receive equal weight, indicator age groups differ, and estimate uncertainty is not incorporated. Food-insecurity findings apply only to covered counties. The overlap thresholds describe relative county profiles rather than validated criteria for allocating resources; further assessment would require local information on population burden and access to care.
+
+## References
+
+1.  Centers for Disease Control and Prevention. [PLACES: County Data, 2024 release](https://data.cdc.gov/d/fu4u-a9bh). Selected 2022 age-adjusted indicators. Accessed October 24, 2026.
+2.  Centers for Disease Control and Prevention. [PLACES release history: General FAQs](https://www.cdc.gov/places/faqs/general-faqs/index.html). The August 2024 release and its underlying survey years. Accessed October 24, 2026.
+3.  Centers for Disease Control and Prevention. [PLACES measure definitions: Health Outcomes](https://www.cdc.gov/places/measure-definitions/health-outcomes.html). Diabetes and obesity. Accessed October 24, 2026.
+4.  Centers for Disease Control and Prevention. [PLACES measure definitions: Health Risk Behaviors](https://www.cdc.gov/places/measure-definitions/health-risk-behaviors.html). Inactivity, smoking, and short sleep. Accessed October 24, 2026.
+5.  Centers for Disease Control and Prevention. [PLACES measure definitions: Prevention](https://www.cdc.gov/places/measure-definitions/prevention.html). Insurance and routine checkups. Accessed October 24, 2026.
+6.  Centers for Disease Control and Prevention. [PLACES measure definitions: Health-Related Social Needs](https://www.cdc.gov/places/measure-definitions/health-related-social-needs.html). Food insecurity and module coverage. Accessed October 24, 2026.
+7.  Centers for Disease Control and Prevention. [2022 BRFSS Questionnaire](https://www.cdc.gov/brfss/questionnaires/pdf-ques/2022-BRFSS-Questionnaire-508.pdf). Core sections on exercise, sleep, healthcare access, chronic conditions and smoking; Social Determinants and Health Equity module, food question MSDHE.06. Accessed October 24, 2026.
+8.  Centers for Disease Control and Prevention. [PLACES Methodology](https://www.cdc.gov/places/methodology/index.html). Model-based small-area estimates and source uncertainty. Accessed October 24, 2026.
+
+## Appendix
+
+### Group medians for Figures 3-7
+
+Each row represents one county obesity quartile, from Q1 (lowest) to Q4 (highest). Each comparison indicator has two columns: Lower is below its national county median and Higher is at or above it. All numeric entries are age-adjusted diabetes medians (%), shown to two decimal places. County counts are not included.
+
+```{r}
+# One row per obesity quartile; two columns for each comparison indicator.
+median_appendix <- data.frame(obesity_group=levels(dat$obesity_group))
+median_summaries <- list(Inactivity=activity_summary,Smoking=smoking_summary,
+  Short_sleep=sleep_summary,Uninsured=insurance_summary,Checkups=checkup_summary)
+group_columns <- c("activity_group","smoking_group","sleep_group",
+                   "insurance_group","checkup_group")
+
+for(i in seq_along(median_summaries)) {
+  current <- median_summaries[[i]]
+  lower <- current[current[,group_columns[i]]=="Lower", ]
+  higher <- current[current[,group_columns[i]]=="Higher", ]
+
+  # Match quartile names so each median is placed in its correct row.
+  median_appendix[[paste0(names(median_summaries)[i],"_Lower")]] <-
+    lower$Median_diabetes[match(median_appendix$obesity_group,lower$obesity_group)]
+  median_appendix[[paste0(names(median_summaries)[i],"_Higher")]] <-
+    higher$Median_diabetes[match(median_appendix$obesity_group,higher$obesity_group)]
+}
+
+knitr::kable(median_appendix,digits=2,row.names=FALSE,format="html",
+  format.args=list(nsmall=2),escape=FALSE,
+  col.names=c("Obesity<br>quartile","Inactivity<br>Lower","Inactivity<br>Higher",
+              "Smoking<br>Lower","Smoking<br>Higher",
+              "Short sleep<br>Lower","Short sleep<br>Higher",
+              "Uninsured<br>Lower","Uninsured<br>Higher",
+              "Checkups<br>Lower","Checkups<br>Higher"),
+  caption="Table A1. Median age-adjusted diabetes estimates (%) for Figures 3-7; comparison indicators are arranged horizontally.")
+```
+
+### State-level diabetes medians for Figure 10
+
+The table lists all 50 states and DC in alphabetical order, reading down each pair of columns before moving to the next pair. Values are the same medians of county age-adjusted diabetes estimates used for the first map. Alaska and Hawaii are included here even though they are outside the map extent. Each county receives equal weight; these are not resident-weighted state prevalence estimates.
+
+```{r}
+# Reuse the state medians already calculated for the first map.
+state_medians <- state_health |>
+  arrange(State) |>
+  select(State,Median_diabetes)
+
+# Divide the alphabetical list into three equally sized blocks.
+# Place the blocks side by side: state and median, repeated three times.
+rows_per_block <- ceiling(nrow(state_medians)/3)
+state_median_appendix <- cbind(
+  state_medians[seq_len(rows_per_block), ],
+  state_medians[rows_per_block+seq_len(rows_per_block), ],
+  state_medians[2*rows_per_block+seq_len(rows_per_block), ])
+
+knitr::kable(state_median_appendix,digits=1,row.names=FALSE,format="html",
+  col.names=c("State / DC","Median diabetes (%)",
+              "State / DC","Median diabetes (%)",
+              "State / DC","Median diabetes (%)"),
+  caption="Table A2. State medians of county age-adjusted diabetes estimates (%), corresponding to Figure 10.")
+```
+
+### State-level overlap counts for Figure 11
+
+This table displays every row of priority states. It includes states with at least one county meeting both national thresholds. States with zero overlap are excluded. The percentage uses each state's main-analysis county count as its denominator.
+
+```{r}
+# Overlapping counties as % in state
+priority_states <- dat |> group_by(state) |>
+  summarise(Counties=n(),Overlap=sum(priority),Percent=100*mean(priority),.groups="drop") |>
+  filter(Overlap>0) |> arrange(desc(Overlap),state)
+
+knitr::kable(priority_states,
+  digits=c(0,0,0,1),row.names=FALSE,format="html",
+  col.names=c("State","Counties in main sample","Counties meeting both thresholds",
+              "Within-state overlap (%)"),
+  caption="Table A3. All states with at least one county meeting both the diabetes and uninsured thresholds.",
+  format.args=list(big.mark=","))
+```
