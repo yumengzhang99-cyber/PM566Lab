@@ -1,0 +1,200 @@
+---
+title: "PM566LAB8Sabrina"
+format: html
+editor: visual
+embed-resources: true
+theme: darkly
+---
+The execution times discussed below were recorded during an earlier run. Rendering this document again reruns the code, so the timing outputs may differ due to normal variation in system performance.
+
+```{r}
+library(parallel)
+library(microbenchmark)
+```
+
+## Problem 1: Vectorization
+
+### 1. Generate a Poisson matrix
+
+```{r}
+fun1 <- function(n = 100, k = 4, lambda = 4) {
+  x <- NULL
+  
+  for (i in 1:n){
+    x <- rbind(x, rpois(k, lambda))    
+  }
+  
+  return(x)
+}
+
+fun1alt <- function(n = 100, k = 4, lambda = 4) {
+  matrix(
+    rpois(n * k, lambda),
+    nrow = n,
+    ncol = k,
+    byrow = TRUE
+  )
+}
+```
+
+```{r}
+a <- fun1()
+b <- fun1alt()
+
+dim(a)
+dim(b)
+
+identical(dim(a), dim(b))
+
+rbind(
+  fun1 = c(
+    mean = mean(a),
+    variance = var(as.vector(a))
+  ),
+  fun1alt = c(
+    mean = mean(b),
+    variance = var(as.vector(b))
+  )
+)
+```
+
+Both functions generate a matrix with 100 rows and 4 columns. Each function draws its entries from a Poisson distribution with mean 4 and variance 4. Their sample means and variances are reasonably close to these theoretical values. Differences between the summaries are expected because the functions generate independent random samples.
+
+```{r}
+# Benchmarking
+microbenchmark::microbenchmark(
+  fun1(),
+  fun1alt()
+)
+```
+
+In my recorded run, the median execution time was 281.25 microseconds for `fun1()` and 16.25 microseconds for `fun1alt()`. Therefore, the alternative was approximately 17.31 times faster. 
+
+### 2. Find each column's maximum
+
+```{r}
+# Data Generating Process (10 x 10,000 matrix)
+set.seed(1234)
+x <- matrix(rnorm(1e4), nrow=10)
+
+# Find each column's max value
+fun2 <- function(x) {
+  apply(x, 2, max)
+}
+
+fun2alt <- function(x) {
+  ans <- x[1, ]
+  
+  if (nrow(x) > 1L) {
+    for (i in 2:nrow(x)) {
+      current <- x[i, ]
+      update <- which(current > ans)
+      ans[update] <- current[update]
+      ans[is.na(current)] <- NA
+    }
+  }
+  
+  return(ans)
+}
+```
+
+```{r}
+head(fun2(x))
+head(fun2alt(x))
+
+identical(fun2(x), fun2alt(x))
+```
+
+The equality check returns `TRUE`, confirming that both functions produce exactly the same column maximum.
+
+The alternative starts with the first row and updates the current maximum using vectorized comparisons with each remaining row. The supplied data-generation code creates 10 rows and 1,000 columns, so this approach requires nine comparisons across all columns instead of calling `max()` separately for 1,000 columns.
+
+```{r}
+microbenchmark::microbenchmark(
+  fun2(x),
+  fun2alt(x)
+)
+```
+
+In my recorded run, the median execution time was 1,118.45 microseconds for `fun2()` and 163.50 microseconds for `fun2alt()`. Therefore, the alternative was approximately 6.84 times faster without using parallelization. 
+
+## Problem 3: Parallelization
+
+### 1. Parallelize the bootstrap
+
+```{r}
+my_boot <- function(dat, stat, R, ncpus = 1L) {
+  
+  # Getting the random indices
+  n <- nrow(dat)
+  idx <- matrix(sample.int(n, n*R, TRUE), nrow=n, ncol=R)
+  
+  if (ncpus == 1L) {
+    
+    ans <- lapply(seq_len(R), function(i) {
+      stat(dat[idx[,i], , drop=FALSE])
+    })
+    
+  } else {
+    
+    cl <- makeCluster(ncpus)
+    on.exit(stopCluster(cl), add = TRUE)
+    
+    clusterExport(
+      cl,
+      c("dat", "idx", "stat"),
+      envir = environment()
+    )
+    
+    ans <- parLapply(cl, seq_len(R), function(i) {
+      stat(dat[idx[,i], , drop=FALSE])
+    })
+    
+  }
+  
+  # Converting the list into a matrix
+  ans <- do.call(rbind, ans)
+
+  return(ans)
+}
+```
+
+The bootstrap iterations can be parallelized because, after generating the resampling indices, each estimate can be calculated independently.
+
+I created a cluster with `makeCluster(ncpus)`, exporting the required objects with `clusterExport()`, and distributing the iterations using `parLapply()`. The number of workers is determined by `ncpus`. The function uses serial `lapply()` when `ncpus = 1L`, and `on.exit()` ensures that the cluster is stopped when the function exits.
+
+### 2. Compare with a parametric model
+
+```{r}
+# Bootstrap of an OLS
+my_stat <- function(d) coef(lm(y ~ x, data=d))
+
+# DATA SIM
+set.seed(1)
+n <- 500; R <- 1e4
+
+x <- cbind(rnorm(n)); y <- x*5 + rnorm(n)
+
+# Checking if we get something similar as lm
+ans0 <- confint(lm(y~x))
+ans1 <- my_boot(dat = data.frame(x, y), my_stat, R = R, ncpus = 2L)
+
+t(apply(ans1, 2, quantile, c(.025,.975)))
+
+ans0
+```
+
+The bootstrap 95% confidence intervals are approximately [−0.13869, 0.04857] for the intercept and [4.86852, 5.04351] for the slope. The corresponding model-based intervals are [−0.13790, 0.04797] and [4.86501, 5.04883].
+
+The intervals are very similar. Both methods produce intervals containing the true intercept of 0 and slope of 5. This supports the expected behavior of the bootstrap implementation for this simulated dataset. Small differences are expected because the methods construct intervals differently and the bootstrap uses a finite number of samples.
+
+### 3. Compare execution times
+
+```{r}
+system.time(my_boot(dat = data.frame(x, y), my_stat, R = 4000, ncpus = 1L))
+system.time(my_boot(dat = data.frame(x, y), my_stat, R = 4000, ncpus = 2L))
+```
+
+In my recorded run, elapsed time decreased from 2.67 seconds with one CPU to 2.15 seconds with two CPUs. Using two CPUs achieved approximately a 1.24-fold speedup, reducing elapsed time by about 19.5%. 
+
+The improvement was less than twofold because parallel execution also requires starting workers, transferring data, and collecting results. These additional costs reduce the benefit of distributing the bootstrap calculations across workers. Elapsed time is the appropriate comparison because the master process's CPU time does not include all computation performed by the workers.
