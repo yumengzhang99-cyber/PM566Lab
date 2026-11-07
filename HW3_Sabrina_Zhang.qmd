@@ -1,0 +1,226 @@
+---
+title: "HW3_Sabrina_Zhang"
+author: "Sabrina_Zhang"
+format: html
+editor: visual
+embed-resources: true
+theme: darkly
+---
+
+## Question 1. Abstract counts and the most frequent tokens
+
+```{r}
+library(dplyr)
+library(tidytext)
+library(tidyr)
+library(textdata)
+library(ggplot2)
+library(knitr)
+
+pubmed <- read.csv("pubmed.csv")
+pubmed <- pubmed |> mutate(abstract_id=row_number())
+
+abstract_counts <- pubmed |> count(term)
+kable(abstract_counts,format="html",row.names=FALSE,
+  col.names=c("Search term","Abstract records"),
+  caption="Table 1. Number of abstracts associated with each search term.",
+  format.args=list(big.mark=","))
+
+tokens <- pubmed |> unnest_tokens(word,abstract)
+word_counts <- tokens |> count(term,word)
+top_words <- word_counts |>
+  group_by(term) |>
+  top_n(5,n) |>
+  arrange(term,desc(n)) |>
+  ungroup()
+
+top_words_display <- top_words |>
+  group_by(term) |>
+  mutate(Rank=paste0("Rank ",row_number()),
+         Result=paste0(word," (",format(n,big.mark=",",trim=TRUE),")")) |>
+  ungroup() |>
+  select(term,Rank,Result) |>
+  pivot_wider(names_from=Rank,values_from=Result)
+kable(top_words_display,format="html",row.names=FALSE,
+  col.names=c("Search term","Rank 1","Rank 2","Rank 3","Rank 4","Rank 5"),
+  caption="Table 2. Five most frequent tokens in each search group. Cells show token (occurrences).")
+```
+
+There are 981 COVID abstracts, 376 cystic fibrosis abstracts, 317 meningitis abstracts, 780 preeclampsia abstracts, and 787 prostate cancer abstracts.
+
+"the" and "of" rank first and second in every group. Most leading words are grammatical words, although "covid" and "19" enter the COVID top five, and "cancer" and "prostate" enter the prostate cancer top five. The separate tokens "covid" and "19" illustrate how word tokenization splits the hyphenated disease name COVID-19.
+
+## Question 2. Remove stop words
+
+```{r}
+# Use the complete stop_words table
+clean_words <- tokens |> anti_join(stop_words,by="word")
+top_clean <- clean_words |>
+  count(term,word) |>
+  group_by(term) |>
+  top_n(5,n) |>
+  arrange(term,desc(n)) |>
+  ungroup()
+
+top_clean_display <- top_clean |>
+  group_by(term) |>
+  mutate(Rank=paste0("Rank ",row_number()),
+         Result=paste0(word," (",format(n,big.mark=",",trim=TRUE),")")) |>
+  ungroup() |>
+  select(term,Rank,Result) |>
+  pivot_wider(names_from=Rank,values_from=Result)
+kable(top_clean_display,format="html",row.names=FALSE,
+  col.names=c("Search term","Rank 1","Rank 2","Rank 3","Rank 4","Rank 5"),
+  caption="Table 3. Five most frequent tokens after stop-word removal.")
+```
+
+Yes, removing stop words changes the leading tokens. Common grammatical words disappear, leaving disease names and words describing patients, treatment, and clinical topics. For example, COVID's top five become "covid", "19", "patients", "disease", and "pandemic". The complete results for all five groups are in Table 3.
+
+Words such as "patients" and "disease" remain common across several groups, so removing stop words does not necessarily identify distinctive vocabulary. The preeclampsia list also includes both "pre" and "eclampsia", reflecting the splitting of hyphenated wording. 
+
+## Question 3. Ten most common bigrams
+
+Bigrams are consecutive pairs of words. They are formed within each original abstract, with stop words retained so that removing a word does not create an artificial pair.
+
+```{r}
+bigrams <- pubmed |> unnest_ngrams(bigram,abstract,n=2)
+top_bigrams <- bigrams |> count(bigram,sort=TRUE) |> head(10)
+kable(top_bigrams,
+  col.names=c("Bigram","Occurrences"),
+  caption="Table 4. Ten most frequent bigrams across all abstracts.",
+  format.args=list(big.mark=","))
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+ggplot(top_bigrams,aes(n,reorder(bigram,n))) +
+  geom_col(fill="#4485C7") +
+  labs(x="Bigram occurrences",y=NULL) +
+  theme_bw()
+```
+
+*Figure 1. Ten most frequent bigrams across all abstracts, with stop words retained.*
+
+"covid 19" is the leading bigram with 6,969 occurrences, followed by "of the" (3,883) and "in the" (3,418). The disease-name phrases "prostate cancer" (3,222) and "pre eclampsia" (1,854) also appear. Bigrams recover combinations that word tokenization separates, but grammatical phrases remain frequent. These are counts across all abstracts.
+
+## Question 4. TF-IDF with search term as the document
+
+Each search group is one document, giving five documents in total. I use the original word counts from Question 1, which includes stop words. TF is the fraction of a group's word occurrences represented by a word. IDF is the natural logarithm of five divided by the number of search groups containing that word. TF-IDF multiplies the two.
+
+```{r}
+tfidf <- word_counts |> bind_tf_idf(word,term,n)
+top_tfidf <- tfidf |>
+  group_by(term) |>
+  top_n(5,tf_idf) |>
+  arrange(term,desc(tf_idf)) |>
+  ungroup()
+kable(top_tfidf,digits=5,
+  col.names=c("Search term","Token","Occurrences","TF","IDF","TF-IDF"),
+  caption="Table 4. Five highest-TF-IDF tokens in each search group.")
+```
+
+The top-five lists emphasize vocabulary distinguishing the search groups, such as "coronavirus", "cftr", "pachymeningitis", "gestational", and "prostatectomy". Frequent grammatical words no longer dominate because words appearing in all five documents receive IDF zero.
+
+The cystic fibrosis results illustrate why TF-IDF is different from frequency alone. "cf" occurs less often than "fibrosis" (625 versus 867), yet has a higher TF-IDF (0.01165 versus 0.00901). Its larger IDF gives it more weight for distinguishing this search group. These rankings describe specificity within the five search-group documents, rather than clinical importance or rarity across individual abstracts.
+
+## Question 5. NRC sentiment categories
+
+NRC allows one word to have several sentiment labels. I count word-label matches. The original tokens are used without removing stop words.
+
+```{r}
+nrc <- get_sentiments("nrc")
+# Keep every matching word-label combination, including multiple labels per word.
+nrc_matches <- merge(tokens,nrc,by="word")
+nrc_counts <- nrc_matches |> count(term,sentiment)
+
+nrc_top <- nrc_counts |>
+  group_by(term) |> top_n(1,n) |> ungroup()
+nrc_emotion <- nrc_counts |>
+  filter(!sentiment %in% c("positive","negative")) |>
+  group_by(term) |> top_n(1,n) |> ungroup()
+
+nrc_answer <- merge(nrc_top,nrc_emotion,by="term")
+kable(nrc_answer,
+  col.names=c("Search term","Top category","Matches",
+              "Top emotion without positive/negative","Matches"),
+  caption="Table 5. Most frequent NRC categories with and without positive/negative.")
+
+# Inspect the words contributing to each group's winning emotion.
+nrc_drivers <- merge(nrc_matches,
+  nrc_emotion |> select(term,sentiment),by=c("term","sentiment")) |>
+  count(term,sentiment,word) |>
+  group_by(term) |> top_n(1,n) |> ungroup()
+kable(nrc_drivers,
+  col.names=c("Search term","Emotion","Leading word","Occurrences"),
+  caption="Table 6. Leading word contributing to each group's highest-count emotion.")
+```
+
+With all labels included, positive is most frequent for COVID, cystic fibrosis, and preeclampsia. Negative is most frequent for meningitis and prostate cancer. After removing positive and negative, fear leads for COVID, meningitis, and prostate cancer; anticipation leads for preeclampsia; and disgust leads for cystic fibrosis.
+
+The contributing words help explain these labels. "cystic" supplies 862 of the 1,714 disgust matches in cystic fibrosis, and "cancer" supplies 3,840 of the 8,118 fear matches in prostate cancer. Dictionary associations with medical vocabulary therefore strongly influence the results. They should not be interpreted as the actual emotions of the authors or patients.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+
+# Each row's denominator is all eight-emotion matches in that search group.
+emotion_profile <- nrc_counts |>
+  filter(!sentiment %in% c("positive","negative")) |>
+  group_by(term) |>
+  mutate(Percent=100*n/sum(n)) |>
+  ungroup()
+
+ggplot(emotion_profile,aes(sentiment,term,fill=Percent)) +
+  geom_tile() +
+  geom_text(aes(label=round(Percent,1))) +
+  scale_fill_gradient(low="white",high="#7ABBDB") +
+  labs(x=NULL,y=NULL,fill="Emotion matches (%)") +
+  theme_bw()
+```
+
+*Figure 2. Percentage of NRC emotion matches in each search group after excluding positive and negative.*
+
+The full profiles show that a winning category can be only slightly ahead of another. For cystic fibrosis, disgust accounts for 19.1% of emotion matches and trust for 18.3%. Describing the entire group simply as disgust would hide this close result. Fear accounts for approximately 24.0%, 23.8%, and 23.2% of emotion matches in COVID, meningitis, and prostate cancer, respectively.
+
+## Question 6. Average AFINN score for each abstract
+
+Each abstract receives the average AFINN score of its matched word occurrences. The denominator is the number of matched tokens, not all words in the abstract.
+
+```{r}
+afinn <- get_sentiments("afinn")
+abstract_scores <- tokens |>
+  inner_join(afinn,by="word") |>
+  group_by(abstract_id,term) |>
+  summarise(Score=mean(value),.groups="drop")
+
+abstract_scores <- pubmed |> select(abstract_id,term) |>
+  left_join(abstract_scores,by=c("abstract_id","term"))
+score_summary <- abstract_scores |>
+  group_by(term) |>
+  summarise(Scored=sum(!is.na(Score)),No_match=sum(is.na(Score)),
+            Mean=mean(Score,na.rm=TRUE),Median=median(Score,na.rm=TRUE),
+            .groups="drop")
+kable(score_summary,digits=3,
+  col.names=c("Search term","Scored abstracts","No match","Mean","Median"),
+  caption="Table 7. Abstract-level average AFINN scores by search group.")
+```
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+
+ggplot(abstract_scores |> filter(!is.na(Score)),aes(term,Score)) +
+  geom_boxplot(fill="#7ABBDB") +
+  geom_hline(yintercept=0,linetype="dashed") +
+  labs(x="Search term",y="Average AFINN score per abstract") +
+  theme_bw()
+```
+
+*Figure 3. Distribution of abstract-level average AFINN scores among abstracts with at least one matched word.*
+
+Cystic fibrosis is the clearest descriptive contrast: its mean score is 0.322 and its median is 0.500. The other four means are negative: COVID -0.147, meningitis -0.163, preeclampsia -0.121, and prostate cancer -0.239. All five distributions overlap, so the higher central scores for cystic fibrosis do not mean that every abstract in that group is more positive than abstracts in the other groups.
+
+There are 78 abstracts without an AFINN match: 23 COVID, 19 cystic fibrosis, 25 meningitis, and 11 preeclampsia. They remain in the data but are excluded from the score summaries and plot because their averages are undefined. All 787 prostate cancer abstracts have a score. The group means give equal weight to each scored abstract.
+
+These scores are based on individual words and may not reflect the actual meaning of the abstracts, as medical context and negation are not considered.
