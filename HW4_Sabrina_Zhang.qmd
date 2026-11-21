@@ -1,0 +1,268 @@
+---
+title: "HW4_Sabrina_Zhang"
+author: "Sabrina_Zhang"
+format: html
+editor: visual
+embed-resources: true
+theme: darkly
+---
+
+## Question 1. Faster row totals
+
+```{r}
+library(microbenchmark)
+library(parallel)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+
+# Original function
+fun1 <- function(mat) {
+  n <- nrow(mat)
+  ans <- double(n)
+  for (i in 1:n) {
+    ans[i] <- sum(mat[i, ])
+  }
+  ans
+}
+
+# Use the built-in function
+fun1alt <- function(mat) {
+  rowSums(mat)
+}
+
+set.seed(2315)
+dat <- matrix(rnorm(200 * 100), nrow=200)
+
+all.equal(fun1(dat),fun1alt(dat))
+length(fun1alt(dat))
+
+bench1 <- microbenchmark(
+  Original=fun1(dat),
+  Alternative=fun1alt(dat),
+  times=100)
+kable(summary(bench1,unit="ms")[,c("expr","median","mean")],
+  digits=4,col.names=c("Function","Median (ms)","Mean (ms)"),
+  caption="Table 1. Row-total runtimes over 100 calls per function.")
+```
+
+```{r}
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(as.data.frame(bench1),aes(expr,time/1e6)) +
+  geom_boxplot(fill="#7ABBDB") +
+  labs(x="Function",y="Runtime per call (milliseconds)") +
+  theme_bw()
+```
+
+*Figure 1. Runtime distributions for the original and alternative row-total functions.*
+
+Both functions return the same values in a vector of length 200. The alternative uses rowSums() instead of a row loop and has a lower median runtime across 100 calls.
+
+## Question 2. Faster cumulative row totals
+
+```{r}
+# Original function
+fun2 <- function(mat) {
+  n <- nrow(mat)
+  k <- ncol(mat)
+  ans <- mat
+  for (i in 1:n) {
+    for (j in 2:k) {
+      ans[i,j] <- mat[i,j] + ans[i,j-1]
+    }
+  }
+  ans
+}
+
+# Apply the built-in cumulative sum to each row and restore row orientation.
+fun2alt <- function(mat) {
+  t(apply(mat,1,cumsum))
+}
+
+all.equal(fun2(dat),fun2alt(dat))
+dim(fun2alt(dat))
+
+bench2 <- microbenchmark(
+  Original=fun2(dat),
+  Alternative=fun2alt(dat),
+  times=100)
+kable(summary(bench2,unit="ms")[,c("expr","median","mean")],
+  digits=4,col.names=c("Function","Median (ms)","Mean (ms)"),
+  caption="Table 2. Cumulative-row-total runtimes over 100 calls per function.")
+```
+
+```{r}
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(as.data.frame(bench2),aes(expr,time/1e6)) +
+  geom_boxplot(fill="#7ABBDB") +
+  labs(x="Function",y="Runtime per call (milliseconds)") +
+  theme_bw()
+```
+
+*Figure 2. Runtime distributions for the original and alternative cumulative-row-total functions.*
+
+Both functions return the same values in a 200-by-100 matrix. The alternative calculates each row's cumulative sums with cumsum() and uses t() to preserve the matrix layout. Table 2 and Figure 2 show that alternative one runs faster.
+
+## Question 3. Parallel estimation of pi
+
+```{r}
+sim_pi <- function(n=1000,i=NULL) {
+  p <- matrix(runif(n*2),ncol=2)
+  mean(rowSums(p^2)<1)*4
+}
+
+# Serial
+set.seed(1231)
+serial_time <- system.time({
+  ans_serial <- unlist(lapply(1:4000,sim_pi,n=10000))
+  print(mean(ans_serial))
+})
+
+# Include cluster setup, simulation, and shutdown in one timed run
+parallel_time <- system.time({
+  cl <- makeCluster(6)
+  clusterSetRNGStream(cl,1231)
+  ans_parallel <- unlist(parLapply(cl,1:4000,sim_pi,n=10000))
+  print(mean(ans_parallel))
+  stopCluster(cl)
+})
+
+pi_results <- data.frame(
+  Method=rep(c("Serial","Parallel"),each=4000),
+  Estimate=c(ans_serial,ans_parallel))
+pi_summary <- pi_results |>
+  group_by(Method) |>
+  summarise(Mean=mean(Estimate),SD=sd(Estimate),
+            Minimum=min(Estimate),Maximum=max(Estimate),.groups="drop")
+kable(pi_summary,digits=4,
+  caption="Table 3. Distribution of the 4,000 pi estimates from each method.")
+```
+
+I used six workers to run 4,000 simulations in parallel, with 10,000 points per simulation.
+
+The mean estimates are 3.1412 for the serial method and 3.1417 for the parallel method, both close to pi. The two methods produce similar ranges and standard deviations.
+
+```{r}
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(pi_results,aes(Method,Estimate)) +
+  geom_boxplot(fill="#7ABBDB") +
+  geom_hline(yintercept=pi,linetype="dashed") +
+  labs(x=NULL,y="Estimated pi") +
+  theme_bw()
+```
+
+*Figure 3. Ranges and central distributions of pi estimates. The dashed line marks the mathematical constant pi.*
+
+```{r}
+runtime <- data.frame(
+  Method=c("Serial","Parallel"),
+  Elapsed=c(serial_time[["elapsed"]],parallel_time[["elapsed"]]))
+kable(runtime,digits=3,
+  col.names=c("Method","Elapsed time (seconds)"),
+  caption="Table 4. Complete elapsed times, including parallel cluster setup and shutdown.")
+```
+
+```{r}
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(runtime,aes(Method,Elapsed)) +
+  geom_col(fill="#4485C7") +
+  labs(x=NULL,y="Elapsed time (seconds)") +
+  coord_flip() +
+  theme_bw()
+```
+
+*Figure 4. Complete serial and parallel runtimes, including parallel cluster setup and shutdown.*
+
+Table 4 and Figure 4 show that the parallel version is faster in this run, including cluster setup and shutdown.
+
+## Question 4. Number of movies by rating
+
+```{r}
+library(RSQLite)
+library(DBI)
+
+con <- dbConnect(SQLite(),":memory:")
+film <- read.csv("https://raw.githubusercontent.com/ivanceras/sakila/master/csv-sakila-db/film.csv")
+film_category <- read.csv("https://raw.githubusercontent.com/ivanceras/sakila/master/csv-sakila-db/film_category.csv")
+category <- read.csv("https://raw.githubusercontent.com/ivanceras/sakila/master/csv-sakila-db/category.csv")
+
+dbWriteTable(con,"film",film)
+dbWriteTable(con,"film_category",film_category)
+dbWriteTable(con,"category",category)
+```
+
+```{sql, connection=con}
+SELECT rating AS rating_label, COUNT(*) AS titles_in_rating
+FROM film
+GROUP BY rating
+ORDER BY rating;
+```
+
+The counts are G: 180, NC-17: 210, PG: 194, PG-13: 223, and R: 195. PG-13 has the most movies, and G has the fewest.
+
+## Question 5. Average replacement cost and rental rate by rating
+
+```{sql, connection=con}
+SELECT rating AS rating_label,
+       ROUND(AVG(replacement_cost),2) AS replacement_price_mean,
+       ROUND(AVG(rental_rate),2) AS rental_price_mean
+FROM film
+GROUP BY rating
+ORDER BY rating;
+```
+
+PG-13 has the highest average replacement cost ($20.40), and PG has the lowest ($18.96). PG has the highest average rental rate ($3.05), and G has the lowest ($2.91).
+
+## Question 6. Number of films by category ID
+
+```{sql, connection=con, max.print=-1}
+SELECT genre_link.category_id AS genre_identifier,
+       COUNT(*) AS titles_in_genre
+FROM film AS catalog_title
+INNER JOIN film_category AS genre_link
+  ON catalog_title.film_id=genre_link.film_id
+GROUP BY genre_link.category_id
+ORDER BY genre_link.category_id;
+```
+
+The 16 categories contain 1,000 films. Category 15 has the most (74), and category 12 has the fewest (51). The check below identifies films without a category record.
+
+```{sql, connection=con}
+SELECT catalog_title.film_id AS title_without_genre
+FROM film AS catalog_title
+LEFT JOIN film_category AS genre_link
+  ON catalog_title.film_id=genre_link.film_id
+WHERE genre_link.film_id IS NULL
+ORDER BY catalog_title.film_id;
+```
+
+Film IDs 1001 and 1002 have no category record, explaining the difference from the 1,002 films in Question 4.
+
+## Question 7. Name of the most popular category
+
+```{sql, connection=con}
+SELECT genre_lookup.name AS leading_genre,
+       COUNT(*) AS catalog_title_total
+FROM film AS catalog_title
+INNER JOIN film_category AS genre_link
+  ON catalog_title.film_id=genre_link.film_id
+INNER JOIN category AS genre_lookup
+  ON genre_link.category_id=genre_lookup.category_id
+GROUP BY genre_lookup.category_id,genre_lookup.name
+ORDER BY catalog_title_total DESC
+LIMIT 1;
+```
+
+Sports is the most popular category by number of films, with 74 films.
+
+```{r}
+dbDisconnect(con)
+```
